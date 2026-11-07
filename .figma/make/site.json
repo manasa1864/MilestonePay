@@ -1,0 +1,10 @@
+{
+  "description": "Streamlines project payments between clients and freelancers using AI-generated milestones and automated GitHub verification. Releases funds only when deliverables meet predefined acceptance criteria.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
