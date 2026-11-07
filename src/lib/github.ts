@@ -1,0 +1,102 @@
+/**
+ * Deterministic milestone checks against the public GitHub REST API.
+ * Runs in the browser without a token (GitHub allows ~60 requests/hour per IP),
+ * so repositories must be public.
+ */
+import type { Criterion } from "./types";
+
+export type RepoRef = { owner: string; repo: string };
+
+export type CheckResult = { criterionId: string; passed: boolean; evidence: string };
+
+export type VerifyOutcome = { commitSha: string; defaultBranch: string; htmlUrl: string; results: CheckResult[] };
+
+const API = "https://api.github.com";
+
+export function parseRepoUrl(url: string): RepoRef | null {
+  const m = url.trim().match(/^https:\/\/github\.com\/([A-Za-z0-9-_.]+)\/([A-Za-z0-9-_.]+?)(?:\.git)?\/?(?:[#?].*)?$/i);
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+async function gh<T>(path: string): Promise<{ status: number; data: T | null }> {
+  const res = await fetch(`${API}${path}`, { headers: { Accept: "application/vnd.github+json" } });
+  if (res.status === 403 || res.status === 429) {
+    const reset = Number(res.headers.get("x-ratelimit-reset"));
+    const at = reset ? ` Try again after ${new Date(reset * 1000).toLocaleTimeString()}.` : "";
+    throw new Error(`GitHub rate limit reached.${at}`);
+  }
+  if (!res.ok) return { status: res.status, data: null };
+  return { status: res.status, data: (await res.json()) as T };
+}
+
+type CheckRun = { name: string; status: string; conclusion: string | null };
+
+async function checkCi(r: RepoRef, sha: string): Promise<Omit<CheckResult, "criterionId">> {
+  const runs = await gh<{ total_count: number; check_runs: CheckRun[] }>(`/repos/${r.owner}/${r.repo}/commits/${sha}/check-runs?per_page=100`);
+  const list = runs.data?.check_runs ?? [];
+  if (list.length) {
+    const ok = new Set(["success", "neutral", "skipped"]);
+    const bad = list.filter((c) => c.status !== "completed" || !ok.has(c.conclusion ?? ""));
+    if (!bad.length) return { passed: true, evidence: `All ${list.length} GitHub check run${list.length === 1 ? "" : "s"} passed on ${sha.slice(0, 7)}.` };
+    const names = bad.slice(0, 4).map((c) => `${c.name} (${c.status === "completed" ? c.conclusion : c.status})`).join(", ");
+    return { passed: false, evidence: `${bad.length} of ${list.length} check runs did not pass: ${names}.` };
+  }
+  const status = await gh<{ state: string; total_count: number }>(`/repos/${r.owner}/${r.repo}/commits/${sha}/status`);
+  if (status.data && status.data.total_count > 0) {
+    return status.data.state === "success"
+      ? { passed: true, evidence: `Combined commit status is "success" across ${status.data.total_count} checks.` }
+      : { passed: false, evidence: `Combined commit status is "${status.data.state}".` };
+  }
+  return { passed: false, evidence: `No CI checks were reported for commit ${sha.slice(0, 7)}. Add a GitHub Actions workflow.` };
+}
+
+async function checkFile(r: RepoRef, sha: string, path: string | undefined): Promise<Omit<CheckResult, "criterionId">> {
+  const p = (path ?? "").trim().replace(/^\/+/, "");
+  if (!p) return { passed: false, evidence: "No file path was configured for this criterion." };
+  const encoded = p.split("/").map(encodeURIComponent).join("/");
+  const res = await gh<unknown>(`/repos/${r.owner}/${r.repo}/contents/${encoded}?ref=${sha}`);
+  return res.status === 200
+    ? { passed: true, evidence: `Found ${p} at commit ${sha.slice(0, 7)}.` }
+    : { passed: false, evidence: `${p} does not exist at commit ${sha.slice(0, 7)}.` };
+}
+
+type Pull = { number: number; title: string; merged_at: string | null };
+
+async function checkPr(r: RepoRef, branch: string): Promise<Omit<CheckResult, "criterionId">> {
+  const res = await gh<Pull[]>(`/repos/${r.owner}/${r.repo}/pulls?state=closed&base=${encodeURIComponent(branch)}&sort=updated&direction=desc&per_page=50`);
+  const merged = (res.data ?? []).filter((p) => p.merged_at);
+  if (!merged.length) return { passed: false, evidence: `No merged pull requests into ${branch} were found.` };
+  const p = merged[0];
+  return { passed: true, evidence: `${merged.length} merged pull request${merged.length === 1 ? "" : "s"} into ${branch}; latest is #${p.number} "${p.title}" (${new Date(p.merged_at!).toLocaleDateString()}).` };
+}
+
+export async function verifyRepository(
+  repoUrl: string,
+  criteria: Criterion[],
+  onProgress?: (message: string) => void,
+): Promise<VerifyOutcome> {
+  const ref = parseRepoUrl(repoUrl);
+  if (!ref) throw new Error("Enter a repository URL like https://github.com/owner/repo");
+  onProgress?.("Looking up repository");
+  const repo = await gh<{ default_branch: string; html_url: string; private: boolean }>(`/repos/${ref.owner}/${ref.repo}`);
+  if (!repo.data) throw new Error(repo.status === 404 ? "Repository not found. It must exist and be public." : `GitHub returned ${repo.status}.`);
+  const branch = repo.data.default_branch;
+  onProgress?.(`Reading latest commit on ${branch}`);
+  const commit = await gh<{ sha: string }>(`/repos/${ref.owner}/${ref.repo}/commits/${encodeURIComponent(branch)}`);
+  if (!commit.data) throw new Error(`Could not read the latest commit on ${branch}. Is the repository empty?`);
+  const sha = commit.data.sha;
+
+  const results: CheckResult[] = [];
+  for (const c of criteria) {
+    if (c.type === "MANUAL_REVIEW") continue;
+    onProgress?.(`Checking: ${c.description}`);
+    try {
+      const r = c.type === "CI_PASSES" ? await checkCi(ref, sha) : c.type === "FILE_EXISTS" ? await checkFile(ref, sha, c.config.path) : await checkPr(ref, branch);
+      results.push({ criterionId: c.id, ...r });
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("GitHub rate limit")) throw e;
+      results.push({ criterionId: c.id, passed: false, evidence: `Check could not run: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  }
+  return { commitSha: sha, defaultBranch: branch, htmlUrl: repo.data.html_url, results };
+}
