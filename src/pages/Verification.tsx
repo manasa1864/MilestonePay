@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { act, useApp } from "../app-context";
 import { backend } from "../lib/backend";
-import { money as fmt, pad, when } from "../lib/format";
+import { date, money as fmt, pad, when } from "../lib/format";
 import { criterionLabels } from "../lib/plan";
 import { criteriaOf, money, personName, submissionOf, verificationBadge, verificationsOf } from "../lib/select";
 import { Button, Empty, Icon, Modal, StatusBadge } from "../ui";
@@ -22,6 +22,9 @@ export function Verification({ verificationId }: { verificationId: string }) {
   const sub = submissionOf(ws, v.submissionId);
   const crit = criteriaOf(ws, m.id);
   const pending = v.status === "pending_review";
+  const processing = v.status === "processing";
+  const viaPayPal = p.paymentMode === "paypal";
+  const late = v.penaltyPercent > 0;
   const awaitingManual = v.results.filter((r) => r.passed === null).length;
   const passed = v.results.filter((r) => r.passed);
   const failed = v.results.filter((r) => r.passed === false);
@@ -36,7 +39,7 @@ export function Verification({ verificationId }: { verificationId: string }) {
   async function decide(kind: "approve" | "revise") {
     setBusy(true);
     const ok = kind === "approve"
-      ? await act(ctx, () => backend.approveRelease(v!.id), `${fmt(v!.proposedCents)} captured in PayPal Sandbox.`)
+      ? await act(ctx, () => backend.approveRelease(v!.id, viaPayPal), viaPayPal ? `${fmt(v!.proposedCents)} captured in PayPal Sandbox and sent to the freelancer.` : `${fmt(v!.proposedCents)} captured (simulated).`)
       : await act(ctx, () => backend.requestRevision(v!.id, message).then(() => "ok"), "Revision requested. The freelancer has been notified.");
     setBusy(false);
     setDialog(null);
@@ -47,7 +50,9 @@ export function Verification({ verificationId }: { verificationId: string }) {
     await act(ctx, () => backend.setManualResult(v!.id, criterionId, value, ""));
   }
 
-  const actions = client && pending
+  const actions = client && processing
+    ? <Button onClick={() => decide("approve")} disabled={busy}>{busy ? "Finishing…" : "Finish PayPal capture"}</Button>
+    : client && pending
     ? <><Button kind="secondary" onClick={() => { setMessage(failingText ? `Please address the following:\n${failingText}` : ""); setDialog("revise"); }}>Request revision</Button><Button onClick={() => setDialog("approve")} disabled={awaitingManual > 0 || v.proposedCents <= 0} title={awaitingManual ? "Review the client-review criteria first" : undefined}>Approve {fmt(v.proposedCents)} release</Button></>
     : !client && m.status === "revision_requested" && v.status === "revision_requested"
       ? <><Button kind="secondary" onClick={() => go(`/project/${p.id}`)}>Back to project</Button><Button onClick={() => go(`/milestone/${m.id}/submit`)}>Address feedback</Button></>
@@ -58,8 +63,10 @@ export function Verification({ verificationId }: { verificationId: string }) {
     <div className="report-top"><div><div className="eyebrow">EVIDENCE REPORT · VR-{v.id.slice(0, 6).toUpperCase()}</div><h1>Milestone verification</h1><p>{p.title} · Milestone {pad(m.position)} · {m.title}</p></div><div className="report-actions">{actions}</div></div>
     {client && pending && awaitingManual > 0 && <div className="profile-nudge"><div><b>{awaitingManual} criterion{awaitingManual === 1 ? "" : "s"} need{awaitingManual === 1 ? "s" : ""} your judgement</b><p>Mark each client-review criterion as passed or not passed below. The release amount updates automatically.</p></div></div>}
     <section className="audit-identity"><div><span>REPOSITORY</span>{sub ? <a href={sub.repoUrl} target="_blank" rel="noreferrer noopener"><Icon name="github" size={16}/> {sub.repoUrl.replace("https://", "")} <Icon name="external" size={13}/></a> : <b>—</b>}</div><div><span>COMMIT</span>{sub?.commitSha ? <a className="mono" href={`${sub.repoUrl}/commit/${sub.commitSha}`} target="_blank" rel="noreferrer noopener">{sub.commitSha.slice(0, 7)}</a> : <b>—</b>}</div><div><span>SUBMITTED</span><b>{when(v.createdAt)}</b></div><div><span>STATUS</span><StatusBadge tone={b.tone}>{b.label}</StatusBadge></div></section>
-    <section className="score-grid"><div className="score-primary"><span>WEIGHTED VERIFICATION SCORE</span><strong>{Math.round(v.scorePercent)}<span>%</span></strong><div className="verification-bar"><i style={{ width: `${passedW}%` }}/><em style={{ width: `${failedW}%` }}/></div><p>{passed.length} of {v.results.length} acceptance criteria passed{awaitingManual ? ` · ${awaitingManual} awaiting client review` : ""}</p></div><div><span>PASSED</span><strong>{pad(passed.length)}</strong><small>{passedW}% total weight</small></div><div><span>FAILED</span><strong>{pad(failed.length)}</strong><small>{failedW}% total weight</small></div><div className="release-box"><span>{v.status === "approved" ? "CAPTURED" : "PROPOSED RELEASE"}</span><strong className="mono">{fmt(v.status === "approved" ? m.capturedCents : v.proposedCents)}</strong><small>{Math.round(v.scorePercent)}% of {fmt(m.amountCents)}</small></div></section>
-    <div className="method-note"><b>How this was calculated</b><p>The milestone amount ({fmt(m.amountCents)}) is multiplied by the combined weight of passed criteria. GitHub checks are deterministic; client-review criteria are decided by the client. Nothing is captured until the client approves.</p></div>
+    <section className="score-grid"><div className="score-primary"><span>WEIGHTED VERIFICATION SCORE</span><strong>{Math.round(v.scorePercent)}<span>%</span></strong><div className="verification-bar"><i style={{ width: `${passedW}%` }}/><em style={{ width: `${failedW}%` }}/></div><p>{passed.length} of {v.results.length} acceptance criteria passed{awaitingManual ? ` · ${awaitingManual} awaiting client review` : ""}</p></div><div><span>PASSED</span><strong>{pad(passed.length)}</strong><small>{passedW}% total weight</small></div><div><span>FAILED</span><strong>{pad(failed.length)}</strong><small>{failedW}% total weight</small></div><div className="release-box"><span>{v.status === "approved" ? "CAPTURED" : "PROPOSED RELEASE"}</span><strong className="mono">{fmt(v.status === "approved" ? m.capturedCents : v.proposedCents)}</strong><small>{late ? `${fmt(v.baseCents)} − ${v.penaltyPercent}% late penalty` : `${Math.round(v.scorePercent)}% of ${fmt(m.amountCents)}`}</small></div></section>
+    {late && <div className="late-note"><Icon name="alert" size={15}/><p><b>Submitted {v.daysLate} day{v.daysLate === 1 ? "" : "s"} after the due date{m.dueDate ? ` (${date(m.dueDate)})` : ""}.</b> The project’s policy is {p.latePenaltyPerDay}% per day late, capped at {p.latePenaltyCap}%, so the release is reduced by {v.penaltyPercent}%: {fmt(v.baseCents)} → {fmt(v.proposedCents)}.</p></div>}
+    {processing && <div className="late-note"><Icon name="alert" size={15}/><p><b>The PayPal capture didn’t finish.</b> {client ? "Click “Finish PayPal capture” to complete it. PayPal won’t charge twice." : "Waiting for the client to finish the payment."}</p></div>}
+    <div className="method-note"><b>How this was calculated</b><p>The milestone amount ({fmt(m.amountCents)}) is multiplied by the combined weight of passed criteria{p.latePenaltyPerDay > 0 ? `, then reduced by ${p.latePenaltyPerDay}% per day the submission was late (max ${p.latePenaltyCap}%)` : ""}. GitHub checks are deterministic{sub?.checkedBy === "server" ? " and ran on the MilestonePay server" : ""}; client-review criteria are decided by the client. Nothing is captured until the client approves.</p></div>
     {sub?.notes && <div className="freelancer-notes"><span>NOTES FROM {personName(ws, sub.freelancerId).toUpperCase()}</span><p>{sub.notes}</p></div>}
     <section className="evidence-table"><div className="evidence-head"><span>Criterion</span><span>Type</span><span>Result</span><span>Weight</span><span/></div>
       {crit.map((c) => {
@@ -80,8 +87,8 @@ export function Verification({ verificationId }: { verificationId: string }) {
 
     {dialog === "approve" && <Modal title="Approve payment release?" onClose={() => setDialog(null)} actions={<><Button kind="secondary" onClick={() => setDialog(null)}>Cancel</Button><Button onClick={() => decide("approve")} disabled={busy}>{busy ? "Capturing…" : `Approve and capture ${fmt(v.proposedCents)}`}</Button></>}>
       <p>{v.scorePercent < 100 ? "You are approving a partial capture for the criteria that passed. The unpassed portion is not paid for this milestone." : "All criteria passed. The full milestone amount will be captured."}</p>
-      <div className="modal-summary"><div><span>Project</span><b>{p.title}</b></div><div><span>Milestone</span><b>{pad(m.position)} · {m.title}</b></div><div><span>Authorization remaining</span><b className="mono">{fmt(totals.remaining)}</b></div><div className="modal-total"><span>Amount to capture</span><strong className="mono">{fmt(v.proposedCents)}</strong></div></div>
-      <div className="legal-note compact"><Icon name="alert" size={16}/><p>This simulates a PayPal Sandbox capture. {m.position === Math.max(...ws.milestones.filter((x) => x.projectId === p.id).map((x) => x.position)) ? "This is the final milestone: any remaining authorization will be released." : "The next milestone opens for the freelancer."}</p></div>
+      <div className="modal-summary"><div><span>Project</span><b>{p.title}</b></div><div><span>Milestone</span><b>{pad(m.position)} · {m.title}</b></div>{late && <><div><span>For passed criteria</span><b className="mono">{fmt(v.baseCents)}</b></div><div><span>Late penalty ({v.daysLate} day{v.daysLate === 1 ? "" : "s"})</span><b className="mono">−{v.penaltyPercent}%</b></div></>}<div><span>Authorization remaining</span><b className="mono">{fmt(totals.remaining)}</b></div><div className="modal-total"><span>Amount to capture</span><strong className="mono">{fmt(v.proposedCents)}</strong></div></div>
+      <div className="legal-note compact"><Icon name="alert" size={16}/><p>{viaPayPal ? "This captures the amount from the client’s PayPal Sandbox authorization and pays it out to the freelancer’s PayPal." : "This simulates the capture; no PayPal account is charged."} {m.position === Math.max(...ws.milestones.filter((x) => x.projectId === p.id).map((x) => x.position)) ? "This is the final milestone: any remaining authorization will be released." : "The next milestone opens for the freelancer."}</p></div>
     </Modal>}
     {dialog === "revise" && <Modal title="Request a revision" icon="alert" onClose={() => setDialog(null)} actions={<><Button kind="secondary" onClick={() => setDialog(null)}>Cancel</Button><Button onClick={() => decide("revise")} disabled={busy || message.trim().length < 5}>{busy ? "Sending…" : "Send revision request"}</Button></>}>
       <p>Nothing is captured. The freelancer sees your message and can resubmit; all checks run again.</p>

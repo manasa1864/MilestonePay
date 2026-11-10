@@ -2,8 +2,9 @@ export type Role = "client" | "freelancer";
 export type ProjectStatus = "draft" | "in_progress" | "completed" | "cancelled";
 export type MilestoneStatus = "not_started" | "in_progress" | "submitted" | "revision_requested" | "approved";
 export type CriterionType = "CI_PASSES" | "FILE_EXISTS" | "PR_MERGED" | "MANUAL_REVIEW";
-export type VerificationStatus = "pending_review" | "approved" | "revision_requested" | "superseded";
-export type PaymentKind = "authorization" | "capture" | "release";
+export type VerificationStatus = "pending_review" | "processing" | "approved" | "revision_requested" | "superseded";
+export type PaymentKind = "authorization" | "capture" | "release" | "payout";
+export type PaymentMode = "simulated" | "paypal";
 
 export type ResumeRef = { path: string; name: string; size: number };
 
@@ -18,13 +19,17 @@ export type Profile = {
   skills: string[];
   portfolioUrl: string;
   githubUsername: string;
+  /** Only filled for your own profile. Freelancers are paid out to this PayPal address. */
+  paypalEmail: string;
   resume: ResumeRef | null;
+  /** Text read from the resume for client search. Only filled for your own profile. */
+  resumeText: string;
   createdAt: string;
 };
 
+/** Public track record shown on freelancer profiles. Deliberately contains no money. */
 export type FreelancerStats = {
   verifiedMilestones: number;
-  capturedCents: number;
   completedProjects: number;
   passRate: number | null;
   avgRating: number | null;
@@ -39,6 +44,10 @@ export type Project = {
   brief: string;
   budgetCents: number;
   status: ProjectStatus;
+  latePenaltyPerDay: number;
+  latePenaltyCap: number;
+  paymentMode: PaymentMode;
+  authorizationExpiresAt: string | null;
   authorizationRef: string | null;
   authorizedAt: string | null;
   completedAt: string | null;
@@ -76,6 +85,7 @@ export type Submission = {
   repoUrl: string;
   commitSha: string | null;
   notes: string;
+  checkedBy: "browser" | "server";
   createdAt: string;
 };
 
@@ -91,6 +101,11 @@ export type Verification = {
   submissionId: string;
   milestoneId: string;
   scorePercent: number;
+  /** Amount for the passed criteria before any late penalty. */
+  baseCents: number;
+  daysLate: number;
+  penaltyPercent: number;
+  /** Amount to release after the late penalty. */
   proposedCents: number;
   status: VerificationStatus;
   createdAt: string;
@@ -114,6 +129,7 @@ export type Payment = {
   kind: PaymentKind;
   amountCents: number;
   reference: string;
+  note: string;
   createdAt: string;
 };
 
@@ -158,15 +174,22 @@ export type ProfileInput = {
   skills: string[];
   portfolioUrl: string;
   githubUsername: string;
+  paypalEmail: string;
 };
 
-export type SignUpInput = ProfileInput & { email: string; password: string; role: Role; resumeFile: File | null };
+export type SignUpInput = ProfileInput & { email: string; password: string; role: Role; resumeFile: File | null; resumeText: string };
+
+/** One search hit: which freelancer matched, how well, and where the keywords were found. */
+export type FreelancerMatch = { id: string; score: number; matchedIn: "profile" | "resume"; snippet: string };
 
 export type SignUpResult = { profile: Profile | null };
 
 export type CriterionDraft = { type: CriterionType; description: string; weight: number; config: { path?: string } };
 export type MilestoneDraft = { title: string; description: string; percent: number; dueDate: string; criteria: CriterionDraft[] };
-export type ProjectDraft = { title: string; brief: string; budgetCents: number; freelancerId: string; milestones: MilestoneDraft[] };
+export type ProjectDraft = {
+  title: string; brief: string; budgetCents: number; freelancerId: string; milestones: MilestoneDraft[];
+  latePenaltyPerDay: number; latePenaltyCap: number;
+};
 
 export type SubmissionInput = {
   milestoneId: string;
@@ -175,6 +198,19 @@ export type SubmissionInput = {
   notes: string;
   results: { criterionId: string; passed: boolean; evidence: string }[];
 };
+
+/** Which real integrations are switched on (Supabase app_settings + .env). */
+export type AppSettings = {
+  /** Real PayPal Sandbox through the `paypal` Edge Function. */
+  paypalEnabled: boolean;
+  /** Public PayPal client id for the checkout buttons (VITE_PAYPAL_CLIENT_ID). */
+  paypalClientId: string;
+  currency: string;
+  /** GitHub checks run in the `github-verify` Edge Function with a server token. */
+  serverGithubChecks: boolean;
+};
+
+export type CheckOutcome = { commitSha: string; defaultBranch: string; results: { criterionId: string; passed: boolean; evidence: string }[] };
 
 /** Resume change on profile update: undefined = keep, null = remove, File = replace. */
 export type ResumeChange = File | null | undefined;
@@ -186,19 +222,29 @@ export interface Backend {
   signIn(email: string, password: string): Promise<Profile>;
   signOut(): Promise<void>;
   onAuthChange(cb: () => void): () => void;
-  updateProfile(input: ProfileInput, resume: ResumeChange): Promise<Profile>;
+  /** resumeText: undefined = keep what is stored, otherwise the new text read from the resume ("" clears it). */
+  updateProfile(input: ProfileInput, resume: ResumeChange, resumeText?: string): Promise<Profile>;
   resumeUrl(resume: ResumeRef): Promise<string>;
 
   listFreelancers(): Promise<{ profile: Profile; stats: FreelancerStats }[]>;
+  /** Keyword search over profiles and resume text. Every keyword must match; every picked skill must be on the profile. */
+  searchFreelancers(query: string, skills: string[]): Promise<FreelancerMatch[]>;
   freelancerReviews(freelancerId: string): Promise<Review[]>;
   loadWorkspace(): Promise<Workspace>;
 
+  settings(): Promise<AppSettings>;
+  runChecks(milestoneId: string, repoUrl: string, criteria: Criterion[], onProgress?: (m: string) => void): Promise<CheckOutcome>;
+  paypalCreateOrder(projectId: string): Promise<string>;
+  paypalAuthorize(projectId: string, orderId: string): Promise<string>;
+  retryPayout(milestoneId: string): Promise<void>;
+
   createProject(draft: ProjectDraft): Promise<string>;
+  updateDraftProject(projectId: string, draft: ProjectDraft): Promise<void>;
   authorizeProject(projectId: string): Promise<string>;
-  cancelProject(projectId: string): Promise<void>;
+  cancelProject(projectId: string, viaPayPal: boolean): Promise<void>;
   submitMilestone(input: SubmissionInput): Promise<string>;
   setManualResult(verificationId: string, criterionId: string, passed: boolean, note: string): Promise<void>;
-  approveRelease(verificationId: string): Promise<string>;
+  approveRelease(verificationId: string, viaPayPal: boolean): Promise<string>;
   requestRevision(verificationId: string, message: string): Promise<void>;
   submitReview(projectId: string, rating: number, body: string): Promise<void>;
 }

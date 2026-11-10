@@ -1,13 +1,13 @@
 import { useApp } from "../app-context";
 import { money as fmt, pad, when } from "../lib/format";
-import { currentMilestone, latestVerification, money } from "../lib/select";
+import { currentMilestone, isOverdue, latestVerification, money } from "../lib/select";
 import { Button, Empty, Icon, PageHeader } from "../ui";
 import { ProjectsTable } from "./Projects";
 
 type Item = { title: string; detail: string; path: string };
 
 export function Overview() {
-  const { ws, user, go } = useApp();
+  const { ws, user, go, settings } = useApp();
   const client = user.role === "client";
   const first = user.fullName.split(" ")[0] || "there";
   const totals = money(ws);
@@ -23,8 +23,10 @@ export function Overview() {
     if (!m) continue;
     const v = latestVerification(ws, m.id);
     if (client && m.status === "submitted" && v) items.push({ title: `Review milestone ${pad(m.position)}`, detail: `${p.title} · ${fmt(v.proposedCents)} proposed`, path: `/verification/${v.id}` });
-    if (!client && m.status === "in_progress") items.push({ title: `Submit milestone ${pad(m.position)}`, detail: `${p.title} · ${m.title}`, path: `/milestone/${m.id}/submit` });
-    if (!client && m.status === "revision_requested") items.push({ title: `Address revision on milestone ${pad(m.position)}`, detail: p.title, path: `/milestone/${m.id}/submit` });
+    const late = isOverdue(m) ? " · overdue" : "";
+    if (client && late) items.push({ title: `Milestone ${pad(m.position)} is overdue`, detail: `${p.title} · ${m.title}`, path: `/project/${p.id}` });
+    if (!client && m.status === "in_progress") items.push({ title: `Submit milestone ${pad(m.position)}`, detail: `${p.title} · ${m.title}${late}`, path: `/milestone/${m.id}/submit` });
+    if (!client && m.status === "revision_requested") items.push({ title: `Address revision on milestone ${pad(m.position)}`, detail: `${p.title}${late}`, path: `/milestone/${m.id}/submit` });
     if (!client && m.status === "submitted" && v) items.push({ title: `Awaiting client decision`, detail: `${p.title} · Milestone ${pad(m.position)}`, path: `/verification/${v.id}` });
   }
   if (client) {
@@ -43,6 +45,7 @@ export function Overview() {
 
   return <>
     <PageHeader title={`Welcome, ${first}`} subtitle={client ? "Your projects, payments and milestones at a glance." : "Your assigned work, submissions and earnings at a glance."} action={client ? <Button onClick={() => go("/projects/new")}><Icon name="plus" size={16}/> Create project</Button> : <Button kind="secondary" onClick={() => go("/profile")}>View my profile</Button>}/>
+    {!client && settings.paypalEnabled && !user.paypalEmail && <div className="profile-nudge"><div><b>Add your PayPal email to get paid</b><p>Approved milestones are paid out to your PayPal account. Without an email, payouts wait until you add one.</p></div><Button onClick={() => go("/settings")}>Add PayPal email</Button></div>}
     {incomplete && <div className="profile-nudge"><div><b>Strengthen your freelancer profile</b><p>Clients choose freelancers from the directory. Add a headline, skills, and optionally a portfolio website and resume.</p></div><Button kind="secondary" onClick={() => go("/settings")}>Edit profile</Button></div>}
     <section className="metrics">{metrics.map(([label, value, note]) => <div className="metric" key={label}><span>{label}</span><strong>{value}</strong><small>{note}</small></div>)}</section>
     <div className="dashboard-grid">

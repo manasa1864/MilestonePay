@@ -3,7 +3,7 @@ import { useApp } from "../app-context";
 import { backend, supabaseConfigured } from "../lib/backend";
 import { errorText } from "../lib/format";
 import { Button, Notice, PageHeader } from "../ui";
-import { draftErrors, draftFrom, draftToInput, ProfileFields, resumeChange, type ProfileDraft } from "./ProfileFields";
+import { draftBusy, draftErrors, draftFrom, draftToInput, ProfileFields, resumeChange, resumeTextChange, type ProfileDraft } from "./ProfileFields";
 
 export function Settings() {
   const { user, setUser, reload } = useApp();
@@ -23,7 +23,7 @@ export function Settings() {
     if (problem) { setMessage({ ok: false, text: problem }); return; }
     setBusy(true);
     try {
-      const updated = await backend.updateProfile(draftToInput(name, draft), resumeChange(draft));
+      const updated = await backend.updateProfile(draftToInput(name, draft), resumeChange(draft), resumeTextChange(draft));
       setUser(updated);
       setDraft(draftFrom(updated));
       await reload();
@@ -41,7 +41,7 @@ export function Settings() {
       <div className="field"><label>Email address</label><input value={user.email} disabled/><small>Account type: {client ? "Client" : "Freelancer"}. The account type can’t be changed.</small></div>
       <ProfileFields role={user.role} draft={draft} set={setDraft} attempted={attempted}/>
       {message && <p className={message.ok ? "auth-success" : "auth-error"} role="status">{message.text}</p>}
-      <div className="form-actions"><Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save changes"}</Button></div>
+      <div className="form-actions"><Button type="submit" disabled={busy || draftBusy(draft)}>{busy ? "Saving…" : draftBusy(draft) ? "Reading your resume…" : "Save changes"}</Button></div>
     </form>
     <div className="spacer"/>
     <Notice tone="info">{supabaseConfigured ? "Your data is stored in Supabase. Resumes are kept in a private storage bucket and shared with signed-in clients through short-lived links." : "Local mode: data is stored in this browser only. Add your Supabase URL and anon key to .env to use a real database."}</Notice>

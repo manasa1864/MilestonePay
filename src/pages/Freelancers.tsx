@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../app-context";
 import { backend } from "../lib/backend";
-import { date, errorText, formatSize, initials, money as fmt, pad } from "../lib/format";
-import type { FreelancerStats, Profile, ResumeRef, Review } from "../lib/types";
+import { date, errorText, formatSize, initials, pad } from "../lib/format";
+import { searchTerms } from "../lib/resumeText";
+import type { FreelancerMatch, FreelancerStats, Profile, ResumeRef, Review } from "../lib/types";
 import { Button, Empty, Icon, Notice, PageHeader, Spinner, StatusBadge, Stars } from "../ui";
+import { SkillPicker } from "./SkillPicker";
 
 type Entry = { profile: Profile; stats: FreelancerStats };
 
@@ -44,25 +46,72 @@ function useFreelancers() {
   return { list, error };
 }
 
+function Marked({ text, terms }: { text: string; terms: string[] }) {
+  if (!terms.length) return <>{text}</>;
+  const escaped = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const re = new RegExp(`(${escaped.join("|")})`, "gi");
+  return <>{text.split(re).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part))}</>;
+}
+
 export function FreelancerDirectory() {
   const { go } = useApp();
   const { list, error } = useFreelancers();
   const [q, setQ] = useState("");
-  const shown = (list ?? []).filter(({ profile: p }) => {
-    const n = q.trim().toLowerCase();
-    return !n || p.fullName.toLowerCase().includes(n) || p.headline.toLowerCase().includes(n) || p.skills.some((s) => s.toLowerCase().includes(n));
-  });
-  return <><PageHeader title="Find freelancers" subtitle="Browse registered freelancers, their verified track record, portfolio and resume."/>
-    <div className="filter-row"><span className="muted-text small">{list ? `${list.length} registered freelancer${list.length === 1 ? "" : "s"}` : ""}</span><input className="compact-input" placeholder="Search name or skill" value={q} onChange={(e) => setQ(e.target.value)}/></div>
-    {error && <Notice tone="error">{error}</Notice>}
+  const [skills, setSkills] = useState<string[]>([]);
+  const [matches, setMatches] = useState<FreelancerMatch[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const terms = useMemo(() => searchTerms(q), [q]);
+  const filtering = terms.length > 0 || skills.length > 0;
+
+  // Skills that actually exist on registered profiles, most common first.
+  const pool = useMemo(() => {
+    const count = new Map<string, number>();
+    for (const { profile } of list ?? []) for (const s of profile.skills) count.set(s, (count.get(s) ?? 0) + 1);
+    return [...count.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([s]) => s);
+  }, [list]);
+
+  useEffect(() => {
+    if (!filtering) { setMatches(null); setSearching(false); setSearchError(""); return; }
+    let live = true;
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      backend.searchFreelancers(q, skills)
+        .then((m) => { if (live) { setMatches(m); setSearchError(""); } })
+        .catch((e) => { if (live) { setSearchError(errorText(e)); setMatches([]); } })
+        .finally(() => { if (live) setSearching(false); });
+    }, 250);
+    return () => { live = false; window.clearTimeout(timer); };
+  }, [q, skills, filtering]);
+
+  const byId = new Map((list ?? []).map((e) => [e.profile.id, e]));
+  const shown: { entry: Entry; match?: FreelancerMatch }[] = !filtering
+    ? (list ?? []).map((entry) => ({ entry }))
+    : (matches ?? []).flatMap((m) => { const entry = byId.get(m.id); return entry ? [{ entry, match: m }] : []; });
+  const clearAll = () => { setQ(""); setSkills([]); };
+
+  return <><PageHeader title="Find freelancers" subtitle="Everyone who signs up as a freelancer appears here. Search by keyword, including words inside their resumes."/>
+    <section className="search-panel">
+      <div className="search-main">
+        <Icon name="search" size={16}/>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search keywords: react, kubernetes, fintech…" aria-label="Search freelancers by keyword"/>
+        {q && <button type="button" className="clear" onClick={() => setQ("")} aria-label="Clear search"><Icon name="close" size={13}/></button>}
+      </div>
+      <div className="search-skills"><span>Skills</span><div><SkillPicker value={skills} onChange={setSkills} pool={pool} allowCustom={false} placeholder={pool.length ? "Filter by skill" : "No skills on profiles yet"} caption={null}/></div></div>
+      <small className="search-hint">Looks through names, headlines, skills, bios and the text inside resumes. Scanned resumes are read with OCR when they’re uploaded. Every keyword must match.</small>
+    </section>
+    <div className="filter-row"><span className="muted-text small">{!list ? "" : filtering ? (searching ? "Searching…" : `${shown.length} of ${list.length} freelancer${list.length === 1 ? "" : "s"} match`) : `${list.length} registered freelancer${list.length === 1 ? "" : "s"}`}</span>{filtering && <button className="text-link" onClick={clearAll}>Clear search</button>}</div>
+    {(error || searchError) && <Notice tone="error">{error || searchError}</Notice>}
     {list === null ? <div className="loading-row"><Spinner dark/> Loading freelancers…</div>
       : list.length === 0 ? <section className="section-block"><Empty title="No freelancers yet">Freelancers who create an account appear here automatically.</Empty></section>
-      : shown.length === 0 ? <section className="section-block"><Empty title="No matches">No freelancers match “{q}”.</Empty></section>
-      : <div className="dir-grid">{shown.map(({ profile: p, stats }) => <article className="dir-card" key={p.id}>
-        <button className="dir-top" onClick={() => go(`/freelancers/${p.id}`)}><div className="avatar">{initials(p.fullName)}</div><div><b>{p.fullName}</b><small>{p.headline || "Freelancer"}</small></div><Icon name="chevron" size={15}/></button>
+      : filtering && matches === null ? <div className="loading-row"><Spinner dark/> Searching…</div>
+      : shown.length === 0 ? <section className="section-block"><Empty title="No matches" action={<Button kind="secondary" onClick={clearAll}>Clear search</Button>}>No freelancer matches {terms.length ? <>“{q.trim()}”</> : "those skills"}{terms.length && skills.length ? " with those skills" : ""}. Try fewer keywords.</Empty></section>
+      : <div className="dir-grid">{shown.map(({ entry: { profile: p, stats }, match }) => <article className="dir-card" key={p.id}>
+        <button className="dir-top" onClick={() => go(`/freelancers/${p.id}`)}><div className="avatar">{initials(p.fullName)}</div><div><b><Marked text={p.fullName} terms={terms}/></b><small><Marked text={p.headline || "Freelancer"} terms={terms}/></small></div><Icon name="chevron" size={15}/></button>
         <div className="dir-stats"><span><b>{stats.verifiedMilestones}</b> verified</span><span><b>{stats.passRate == null ? "—" : `${stats.passRate}%`}</b> pass rate</span><span>{stats.avgRating ? <><Stars rating={stats.avgRating}/> ({stats.reviewCount})</> : "No reviews"}</span></div>
-        {p.bio && <p>{p.bio}</p>}
-        {p.skills.length > 0 && <div className="skills">{p.skills.map((s) => <span key={s}>{s}</span>)}</div>}
+        {match?.snippet && <div className="match-snippet"><span>{match.matchedIn === "resume" ? "Found in resume" : "Also in resume"}</span><p><Marked text={match.snippet} terms={terms}/></p></div>}
+        {p.bio && <p><Marked text={p.bio} terms={terms}/></p>}
+        {p.skills.length > 0 && <div className="skills">{p.skills.map((s) => <span key={s} className={skills.some((x) => x.toLowerCase() === s.toLowerCase()) || terms.some((t) => s.toLowerCase().includes(t)) ? "hit" : ""}>{s}</span>)}</div>}
         <ProfileLinks p={p}/>
         <div className="dir-actions"><Button kind="secondary" onClick={() => go(`/freelancers/${p.id}`)}>View profile</Button><Button onClick={() => go(`/projects/new?freelancer=${p.id}`)}>Start a project</Button></div>
       </article>)}</div>}
@@ -87,11 +136,11 @@ export function FreelancerProfile({ freelancerId }: { freelancerId: string }) {
     {!self && <div className="back-row"><button onClick={() => go("/freelancers")}><Icon name="back" size={16}/> All freelancers</button></div>}
     <section className="profile-hero"><div className="profile-avatar">{initials(p.fullName)}</div><div className="profile-main"><span>{s.verifiedMilestones > 0 ? "VERIFIED FREELANCER" : "FREELANCER"}</span><h1>{p.fullName}</h1><p className="profile-headline">{p.headline || (self ? "Add a headline so clients know what you do." : "Freelancer")}</p>{p.bio && <p>{p.bio}</p>}{p.skills.length > 0 && <div className="skills">{p.skills.map((x) => <span key={x}>{x}</span>)}</div>}<ProfileLinks p={p}/></div>
       {self ? <Button kind="secondary" onClick={() => go("/settings")}>Edit profile</Button> : user.role === "client" && <Button onClick={() => go(`/projects/new?freelancer=${p.id}`)}>Start a project</Button>}</section>
-    <section className="profile-stats"><div><strong>{s.verifiedMilestones}</strong><span>Verified milestones</span></div><div><strong className="mono">{fmt(s.capturedCents)}</strong><span>Total captured payments</span></div><div><strong>{pad(s.completedProjects)}</strong><span>Completed projects</span></div><div><strong>{s.passRate == null ? "—" : `${s.passRate}%`}</strong><span>Criteria pass rate</span></div></section>
+    <section className="profile-stats"><div><strong>{s.verifiedMilestones}</strong><span>Verified milestones</span></div><div><strong>{pad(s.completedProjects)}</strong><span>Completed projects</span></div><div><strong>{s.passRate == null ? "—" : `${s.passRate}%`}</strong><span>Criteria pass rate</span></div><div><strong>{s.avgRating ? s.avgRating.toFixed(1) : "—"}</strong><span>{s.reviewCount ? `Average from ${s.reviewCount} review${s.reviewCount === 1 ? "" : "s"}` : "Average rating"}</span></div></section>
     {self && !p.portfolioUrl && !p.resume && <div className="spacer"/>}
     {self && !p.portfolioUrl && !p.resume && <Notice tone="info">You haven’t added a portfolio website or resume. Both are optional, but clients see them when choosing a freelancer. <button className="text-link inline" onClick={() => go("/settings")}>Add them</button></Notice>}
-    {approved.length > 0 && <section className="section-block"><div className="section-heading"><div><h2>{self ? "Your verified milestones" : "Verified work with you"}</h2><p>Evidence-backed work completed through MilestonePay</p></div></div><div className="history-list">{approved.map((m, i) => { const pr = shared.find((x) => x.id === m.projectId)!; return <div key={m.id}><span className="history-index">{pad(i + 1)}</span><div><b>{pr.title}</b><p>{m.title}</p></div><StatusBadge tone="complete">Verified</StatusBadge><button className="text-link" onClick={() => go(`/project/${pr.id}`)}>Project</button><strong className="mono">{fmt(m.capturedCents)}</strong></div>; })}</div></section>}
-    <section className="section-block"><div className="section-heading"><div><h2>Client reviews</h2><p>{s.reviewCount ? `${s.avgRating?.toFixed(1)} average from ${s.reviewCount} review${s.reviewCount === 1 ? "" : "s"}` : "Reviews are only possible after a payment is captured"}</p></div></div>
+    {approved.length > 0 && <section className="section-block"><div className="section-heading"><div><h2>{self ? "Your verified milestones" : "Verified work with you"}</h2><p>Evidence-backed work completed through MilestonePay</p></div></div><div className="history-list">{approved.map((m, i) => { const pr = shared.find((x) => x.id === m.projectId)!; return <div key={m.id}><span className="history-index">{pad(i + 1)}</span><div><b>{pr.title}</b><p>{m.title}</p></div><StatusBadge tone="complete">Verified</StatusBadge><button className="text-link" onClick={() => go(`/project/${pr.id}`)}>Project</button></div>; })}</div></section>}
+    <section className="section-block"><div className="section-heading"><div><h2>Client reviews</h2><p>{s.reviewCount ? `${s.avgRating?.toFixed(1)} average from ${s.reviewCount} review${s.reviewCount === 1 ? "" : "s"}` : "Reviews appear here once a client has worked with this freelancer"}</p></div></div>
       {reviews === null ? <div className="loading-row"><Spinner dark/></div> : reviews.length === 0 ? <p className="empty-note">No reviews yet.</p> : <div className="review-list">{reviews.map((r) => <article key={r.id}><div><Stars rating={r.rating}/><small>{date(r.createdAt)}</small></div><p>{r.body}</p></article>)}</div>}
     </section>
   </>;

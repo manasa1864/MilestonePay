@@ -3,7 +3,7 @@ import { backend, supabaseConfigured } from "../lib/backend";
 import { errorText } from "../lib/format";
 import type { Profile, Role } from "../lib/types";
 import { Button, Icon } from "../ui";
-import { draftErrors, draftFrom, draftToInput, ProfileFields, type ProfileDraft } from "./ProfileFields";
+import { draftBusy, draftErrors, draftFrom, draftToInput, ProfileFields, type ProfileDraft } from "./ProfileFields";
 
 const copy: Record<Role, { statement: ReactNode; text: string; proof: [string, string][] }> = {
   client: {
@@ -37,13 +37,13 @@ export function AuthScreen({ onAuth }: { onAuth: (p: Profile) => void }) {
     e.preventDefault();
     setAttempted(true);
     setError("");
-    if (!valid || busy) return;
+    if (!valid || busy || draftBusy(draft)) return;
     setBusy(true);
     try {
       if (mode === "login") {
         onAuth(await backend.signIn(email.trim(), password));
       } else {
-        const res = await backend.signUp({ ...draftToInput(name, draft), email: email.trim(), password, role, resumeFile: draft.resumeFile });
+        const res = await backend.signUp({ ...draftToInput(name, draft), email: email.trim(), password, role, resumeFile: draft.resumeFile, resumeText: draft.resumeText ?? "" });
         if (res.profile) onAuth(res.profile);
         else setError("Your account was created but your profile couldn’t be loaded. Make sure supabase/schema.sql has been run, then log in.");
       }
@@ -73,7 +73,7 @@ export function AuthScreen({ onAuth }: { onAuth: (p: Profile) => void }) {
           <div className="field"><label>Password</label><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" autoComplete={mode === "login" ? "current-password" : "new-password"} className={attempted && password.length < 6 ? "invalid" : ""}/>{attempted && !valid && <small className="error-text">Complete all required fields with valid details.</small>}</div>
           {mode === "signup" && <><div className="auth-section-label">{role === "client" ? "ABOUT YOUR BUSINESS" : "YOUR FREELANCER PROFILE"}</div><ProfileFields role={role} draft={draft} set={setDraft} attempted={attempted}/></>}
           {error && <p className="auth-error" role="alert">{error}</p>}
-          <Button type="submit" disabled={busy}>{busy ? "Please wait…" : mode === "login" ? "Log in" : role === "client" ? "Create client account" : "Create freelancer account"} <Icon name="arrow" size={16}/></Button>
+          <Button type="submit" disabled={busy || draftBusy(draft)}>{busy ? "Please wait…" : draftBusy(draft) ? "Reading your resume…" : mode === "login" ? "Log in" : role === "client" ? "Create client account" : "Create freelancer account"} <Icon name="arrow" size={16}/></Button>
         </form>
         <p className="auth-disclaimer">{supabaseConfigured ? "Accounts are secured with Supabase Auth. Payments are simulated in PayPal Sandbox." : "Local mode: Supabase isn’t configured yet, so accounts and projects are saved only in this browser."}</p>
       </div>

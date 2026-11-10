@@ -22,3 +22,6 @@ logs/
 
 # keep the template tracked
 !.env.example
+
+# Supabase CLI local state
+supabase/.temp/

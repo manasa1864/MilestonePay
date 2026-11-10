@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { AppContext, useApp, type AppCtx } from "./app-context";
 import { backend, supabaseConfigured } from "./lib/backend";
 import { errorText, initials } from "./lib/format";
-import type { Profile, Role, Workspace } from "./lib/types";
+import type { AppSettings, Profile, Role, Workspace } from "./lib/types";
 import { AuthScreen } from "./pages/Auth";
 import { CreateProject, NotAllowed } from "./pages/CreateProject";
 import { FreelancerDirectory, FreelancerProfile } from "./pages/Freelancers";
@@ -19,6 +19,7 @@ import { Button, Empty, Icon, Spinner, Toast } from "./ui";
 
 type Theme = "light" | "dark" | "system";
 
+const defaultSettings: AppSettings = { paypalEnabled: false, paypalClientId: "", currency: "USD", serverGithubChecks: false };
 const emptyWorkspace: Workspace = { projects: [], milestones: [], criteria: [], submissions: [], verifications: [], revisions: [], payments: [], reviews: [], activity: [], people: {} };
 
 function readHash() {
@@ -52,6 +53,7 @@ function renderRoute(path: string, query: URLSearchParams, role: Role): { node: 
       if (seg[1] === "new") return { node: clientOnly(<CreateProject preselect={query.get("freelancer") ?? undefined}/>), section: "projects" };
       return { node: <Projects/>, section: "projects" };
     case "project":
+      if (seg[1] && seg[2] === "edit") return { node: clientOnly(<CreateProject key={`edit-${seg[1]}`} editId={seg[1]}/>), section: "projects" };
       if (seg[1] && seg[2] === "fund") return { node: clientOnly(<Fund key={seg[1]} projectId={seg[1]}/>), section: "projects" };
       if (seg[1]) return { node: <ProjectDetail key={seg[1]} projectId={seg[1]}/>, section: "projects" };
       break;
@@ -88,6 +90,7 @@ export default function App() {
   const [user, setUserState] = useState<Profile | null>(null);
   const [booting, setBooting] = useState(true);
   const [ws, setWs] = useState<Workspace>(emptyWorkspace);
+  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [wsError, setWsError] = useState("");
   const [loadingWs, setLoadingWs] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
@@ -108,7 +111,9 @@ export default function App() {
 
   const reload = useCallback(async () => {
     try {
-      setWs(await backend.loadWorkspace());
+      const [nextWs, nextSettings] = await Promise.all([backend.loadWorkspace(), backend.settings().catch(() => defaultSettings)]);
+      setWs(nextWs);
+      setSettings(nextSettings);
       setWsError("");
     } catch (e) {
       setWsError(errorText(e));
@@ -131,10 +136,27 @@ export default function App() {
     reload().finally(() => setLoadingWs(false));
   }, [user?.id, reload]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Keep data fresh when the other party acts: refresh on navigation, when the tab regains focus,
+  // and every 30 seconds while the tab is visible.
+  useEffect(() => {
+    if (!user) return;
+    const refresh = () => { if (document.visibilityState === "visible") reload(); };
+    window.addEventListener("hashchange", refresh);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    const timer = window.setInterval(refresh, 30_000);
+    return () => {
+      window.removeEventListener("hashchange", refresh);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.clearInterval(timer);
+    };
+  }, [user?.id, reload]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const notify = useCallback((message: string, tone: "success" | "error" = "success") => setToast({ message, tone }), []);
   const go = useCallback((to: string) => { setMobileOpen(false); route.go(to); }, [route]);
 
-  const ctx: AppCtx | null = useMemo(() => (user ? { user, ws, reload, setUser: (p: Profile) => setUser(p), go, notify } : null), [user, ws, reload, setUser, go, notify]);
+  const ctx: AppCtx | null = useMemo(() => (user ? { user, ws, settings, reload, setUser: (p: Profile) => setUser(p), go, notify } : null), [user, ws, settings, reload, setUser, go, notify]);
 
   if (booting) return <div className="boot"><Spinner dark/></div>;
   if (!user || !ctx) return <AuthScreen onAuth={(p) => { setUser(p); route.go("/overview"); }}/>;
@@ -159,10 +181,10 @@ export default function App() {
   return <AppContext.Provider value={ctx}><div className="app-shell">
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}><div className="brand"><span className="brand-mark"><i/><i/><i/></span><b>MilestonePay</b><button onClick={() => setMobileOpen(false)} aria-label="Close menu"><Icon name="close" size={18}/></button></div>
       <nav>{nav.map((n) => <button key={n.id} className={section === n.id ? "active" : ""} onClick={() => go(n.to)}><Icon name={n.icon} size={17}/><span>{n.label}</span>{counts[n.id] ? <em className="nav-count">{counts[n.id]}</em> : null}</button>)}</nav>
-      <div className="sidebar-bottom"><button className={`settings ${section === "settings" ? "active" : ""}`} onClick={() => go("/settings")}><Icon name="settings" size={17}/>{role === "client" ? "Account settings" : "Edit profile"}</button><div className="profile"><div className="avatar">{initials(user.fullName)}</div><div><b>{user.fullName}</b><small>{role === "client" ? (user.company || "Client account") : "Freelancer account"}</small></div><button className="profile-signout" onClick={signOut} title="Log out">Log out</button></div><div className={`backend-pill ${supabaseConfigured ? "on" : ""}`}><span/>{supabaseConfigured ? "Supabase connected" : "Local mode · browser storage"}</div></div>
+      <div className="sidebar-bottom"><button className={`settings ${section === "settings" ? "active" : ""}`} onClick={() => go("/settings")}><Icon name="settings" size={17}/>{role === "client" ? "Account settings" : "Edit profile"}</button><div className="profile"><div className="avatar">{initials(user.fullName)}</div><div><b>{user.fullName}</b><small>{role === "client" ? (user.company || "Client account") : "Freelancer account"}</small></div><button className="profile-signout" onClick={signOut} title="Log out">Log out</button></div><div className={`backend-pill ${supabaseConfigured ? "on" : ""}`}><span/>{supabaseConfigured ? `Supabase${settings.paypalEnabled ? " · PayPal Sandbox" : ""}${settings.serverGithubChecks ? " · server checks" : ""}` : "Local mode · browser storage"}</div></div>
     </aside>
     {mobileOpen && <div className="mobile-overlay" onClick={() => setMobileOpen(false)}/>}
-    <div className="main-column"><header className="topbar"><button className="mobile-menu" onClick={() => setMobileOpen(true)} aria-label="Open menu"><Icon name="menu" size={20}/></button><div className="mobile-wordmark">MilestonePay</div><div className="demo-label"><span/> PAYPAL SANDBOX · {role === "client" ? "CLIENT" : "FREELANCER"} WORKSPACE</div><div className="top-actions"><div className="theme-control" aria-label="Theme preference">{(["light", "dark", "system"] as Theme[]).map((t) => <button key={t} className={theme === t ? "active" : ""} onClick={() => setTheme(t)} aria-label={`${t} theme`}><Icon name={t === "light" ? "sun" : t === "dark" ? "moon" : "monitor"} size={15}/></button>)}</div><button className="top-avatar" onClick={() => go("/settings")} aria-label="Open settings">{initials(user.fullName)}</button></div></header>
+    <div className="main-column"><header className="topbar"><button className="mobile-menu" onClick={() => setMobileOpen(true)} aria-label="Open menu"><Icon name="menu" size={20}/></button><div className="mobile-wordmark">MilestonePay</div><div className="demo-label"><span/> {settings.paypalEnabled ? "PAYPAL SANDBOX" : "SIMULATED PAYMENTS"} · {role === "client" ? "CLIENT" : "FREELANCER"} WORKSPACE</div><div className="top-actions"><div className="theme-control" aria-label="Theme preference">{(["light", "dark", "system"] as Theme[]).map((t) => <button key={t} className={theme === t ? "active" : ""} onClick={() => setTheme(t)} aria-label={`${t} theme`}><Icon name={t === "light" ? "sun" : t === "dark" ? "moon" : "monitor"} size={15}/></button>)}</div><button className="top-avatar" onClick={() => go("/settings")} aria-label="Open settings">{initials(user.fullName)}</button></div></header>
       <main className="content">
         {wsError && <div className="ws-error"><b>Couldn’t load your data.</b> {wsError} <button className="text-link inline" onClick={reload}>Retry</button></div>}
         {loadingWs && ws.projects.length === 0 && !wsError ? <div className="loading-row"><Spinner dark/> Loading your workspace…</div> : node}

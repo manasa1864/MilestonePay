@@ -25,21 +25,23 @@ export function Payments() {
   const captures = ws.payments.filter((p) => p.kind === "capture").sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   let run = 0;
   const points = captures.map((c) => ({ t: new Date(c.createdAt).getTime(), v: (run += c.amountCents) }));
+  const paidOut = ws.payments.filter((p) => p.kind === "payout").reduce((a, p) => a + p.amountCents, 0);
+  const anyPayPal = ws.projects.some((p) => p.paymentMode === "paypal");
   const metrics: [string, string, string][] = client
     ? [["Total authorized", fmt(t.authorized), "Across all funded projects"], ["Total captured", fmt(t.captured), `${captures.length} capture${captures.length === 1 ? "" : "s"}`], ["Remaining authorization", fmt(t.remaining), t.released ? `${fmt(t.released)} released back` : "Available for capture"]]
-    : [["Captured earnings", fmt(t.captured), `${captures.length} milestone payment${captures.length === 1 ? "" : "s"}`], ["Still authorized", fmt(t.remaining), "Available as you complete milestones"], ["Average per milestone", fmt(captures.length ? Math.round(t.captured / captures.length) : 0), "Across captured milestones"]];
-  const label = { authorization: "Authorized", capture: "Captured", release: "Released" } as const;
-  const tone = { authorization: "active", capture: "complete", release: "pending" } as const;
+    : [["Captured earnings", fmt(t.captured), `${captures.length} milestone payment${captures.length === 1 ? "" : "s"}`], anyPayPal ? ["Paid out to PayPal", fmt(paidOut), paidOut < t.captured ? `${fmt(t.captured - paidOut)} not paid out yet` : "Everything captured has been paid out"] : ["Still authorized", fmt(t.remaining), "Available as you complete milestones"], ["Average per milestone", fmt(captures.length ? Math.round(t.captured / captures.length) : 0), "Across captured milestones"]];
+  const label = { authorization: "Authorized", capture: "Captured", release: "Released", payout: "Paid out" } as const;
+  const tone = { authorization: "active", capture: "complete", release: "pending", payout: "complete" } as const;
 
-  return <><PageHeader title={client ? "Payments" : "Earnings"} subtitle={client ? "Authorization and capture activity across your projects." : "Payments captured for your approved milestones."} action={<span className="sandbox-pill">PAYPAL SANDBOX</span>}/>
+  return <><PageHeader title={client ? "Payments" : "Earnings"} subtitle={client ? "Authorization and capture activity across your projects." : "Payments captured for your approved milestones."} action={<span className="sandbox-pill">{anyPayPal ? "PAYPAL SANDBOX" : "SIMULATED"}</span>}/>
     <section className="metrics">{metrics.map(([l, v, n]) => <div className="metric" key={l}><span>{l}</span><strong>{v}</strong><small>{n}</small></div>)}</section>
     <section className="chart-panel"><div className="section-heading"><div><h2>{client ? "Captured payment activity" : "Earnings over time"}</h2><p>Cumulative captures</p></div><strong className="mono">{fmt(t.captured)}</strong></div><CaptureChart points={points}/></section>
     <section className="section-block"><div className="section-heading"><div><h2>Payment history</h2><p>All authorization, capture and release events</p></div></div>
       {ws.payments.length === 0 ? <Empty title="No payment activity yet">{client ? "Authorize a project to see it here." : "Payments appear once a client funds a project with you."}</Empty>
-        : <div className="table-wrap"><table><thead><tr><th>Date</th><th>Project</th><th>Milestone</th><th>Amount</th><th>Type</th><th>PayPal reference</th></tr></thead><tbody>{ws.payments.map((p) => {
+        : <div className="table-wrap"><table><thead><tr><th>Date</th><th>Project</th><th>Milestone</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead><tbody>{ws.payments.map((p) => {
           const pr = ws.projects.find((x) => x.id === p.projectId);
           const m = ws.milestones.find((x) => x.id === p.milestoneId);
-          return <tr key={p.id} className="clickable" onClick={() => go(`/project/${p.projectId}`)}><td>{date(p.createdAt)}</td><td className="strong">{pr?.title ?? "—"}</td><td>{m ? `Milestone ${pad(m.position)}` : "—"}</td><td className="mono">{fmt(p.amountCents)}</td><td><StatusBadge tone={tone[p.kind]}>{label[p.kind]}</StatusBadge></td><td className="mono muted-text">{p.reference}</td></tr>;
+          return <tr key={p.id} className="clickable" onClick={() => go(`/project/${p.projectId}`)}><td>{date(p.createdAt)}</td><td className="strong">{pr?.title ?? "—"}</td><td>{m ? `Milestone ${pad(m.position)}` : "—"}</td><td className="mono">{fmt(p.amountCents)}</td><td><StatusBadge tone={tone[p.kind]}>{label[p.kind]}</StatusBadge></td><td className="mono muted-text">{p.reference}{p.note && (p.kind === "capture" || p.kind === "payout") ? <small className="ref-note">{p.note}</small> : null}</td></tr>;
         })}</tbody></table></div>}
     </section>
   </>;

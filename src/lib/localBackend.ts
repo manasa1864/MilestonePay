@@ -3,8 +3,9 @@
  * It mirrors the rules enforced by supabase/schema.sql so the app behaves the
  * same either way. Data lives in localStorage on this device only.
  */
+import { verifyRepository } from "./github";
 import type {
-  Activity, Backend, Criterion, FreelancerStats, Milestone, Payment, Profile, ProfileInput, Project, ProjectDraft,
+  Activity, AppSettings, Backend, CheckOutcome, Criterion, FreelancerMatch, FreelancerStats, Milestone, Payment, Profile, ProfileInput, Project, ProjectDraft,
   ResumeChange, ResumeRef, Review, Revision, SignUpInput, SignUpResult, Submission, SubmissionInput, Verification, Workspace,
 } from "./types";
 
@@ -46,7 +47,7 @@ function migrateLegacy(db: DB) {
       db.users.push({
         id: a.id ?? uuid(), role: a.role === "freelancer" ? "freelancer" : "client", fullName: a.name ?? "", email: a.email,
         company: a.company ?? "", headline: a.headline ?? "", bio: a.bio ?? "", skills: a.skills ?? [], portfolioUrl: a.portfolio ?? "",
-        githubUsername: "", resume: a.resume ? { path: a.resume.dataUrl, name: a.resume.name, size: a.resume.size } : null,
+        githubUsername: "", paypalEmail: "", resumeText: "", resume: a.resume ? { path: a.resume.dataUrl, name: a.resume.name, size: a.resume.size } : null,
         createdAt: now(), passHash: a.passHash,
       });
     }
@@ -96,16 +97,25 @@ async function resumeFromFile(file: File): Promise<ResumeRef> {
 function publicProfile(u: StoredUser): Profile {
   const { passHash: _omit, ...p } = u;
   void _omit;
-  return { ...p, email: "" };
+  return { ...p, email: "", paypalEmail: "", resumeText: "" };
 }
 
+/** Same formula as public.recompute_verification in supabase/schema.sql. */
 function recompute(db: DB, v: Verification) {
   const ms = db.milestones.find((m) => m.id === v.milestoneId)!;
+  const project = db.projects.find((p) => p.id === ms.projectId)!;
+  const submission = db.submissions.find((s) => s.id === v.submissionId)!;
   const crit = db.criteria.filter((c) => c.milestoneId === v.milestoneId);
   const total = crit.reduce((a, c) => a + c.weight, 0);
   const passed = crit.reduce((a, c) => a + (v.results.find((r) => r.criterionId === c.id)?.passed ? c.weight : 0), 0);
+  const submitted = submission.createdAt.slice(0, 10);
+  const daysLate = ms.dueDate && submitted > ms.dueDate ? Math.round((Date.parse(submitted) - Date.parse(ms.dueDate)) / 86_400_000) : 0;
+  const penalty = Math.min(project.latePenaltyCap ?? 0, (project.latePenaltyPerDay ?? 0) * daysLate);
   v.scorePercent = total ? Math.round((10000 * passed) / total) / 100 : 0;
-  v.proposedCents = total ? Math.floor((ms.amountCents * passed) / total) : 0;
+  v.baseCents = total ? Math.floor((ms.amountCents * passed) / total) : 0;
+  v.daysLate = daysLate;
+  v.penaltyPercent = penalty;
+  v.proposedCents = Math.floor((v.baseCents * (100 - penalty)) / 100);
 }
 
 export class LocalBackend implements Backend {
@@ -149,7 +159,7 @@ export class LocalBackend implements Backend {
     const user: StoredUser = {
       id: uuid(), role: input.role, fullName: input.fullName, email, company: input.company, headline: input.headline,
       bio: input.bio, skills: input.skills, portfolioUrl: input.portfolioUrl, githubUsername: input.githubUsername,
-      resume, createdAt: now(), passHash: await hashPassword(input.password, email),
+      paypalEmail: input.paypalEmail, resumeText: resume ? input.resumeText.slice(0, 20_000) : "", resume, createdAt: now(), passHash: await hashPassword(input.password, email),
     };
     db.users.push(user);
     db.sessionUserId = user.id;
@@ -176,12 +186,13 @@ export class LocalBackend implements Backend {
     this.emit();
   }
 
-  async updateProfile(input: ProfileInput, resume: ResumeChange) {
+  async updateProfile(input: ProfileInput, resume: ResumeChange, resumeText?: string) {
     const db = load();
     const u = this.me(db);
     Object.assign(u, input);
     if (resume instanceof File) u.resume = await resumeFromFile(resume);
-    else if (resume === null) u.resume = null;
+    else if (resume === null) { u.resume = null; u.resumeText = ""; }
+    if (resume !== null && resumeText !== undefined) u.resumeText = resumeText.slice(0, 20_000);
     save(db);
     return (await this.currentProfile())!;
   }
@@ -196,7 +207,6 @@ export class LocalBackend implements Backend {
     const reviews = db.reviews.filter((r) => r.freelancerId === id);
     return {
       verifiedMilestones: db.milestones.filter((m) => pids.has(m.projectId) && m.status === "approved").length,
-      capturedCents: db.payments.filter((p) => pids.has(p.projectId) && p.kind === "capture").reduce((a, p) => a + p.amountCents, 0),
       completedProjects: projects.filter((p) => p.status === "completed").length,
       passRate: results.length ? Math.round((1000 * results.filter((r) => r.passed).length) / results.length) / 10 : null,
       avgRating: reviews.length ? Math.round((100 * reviews.reduce((a, r) => a + r.rating, 0)) / reviews.length) / 100 : null,
@@ -208,6 +218,34 @@ export class LocalBackend implements Backend {
     const db = load();
     this.me(db);
     return db.users.filter((u) => u.role === "freelancer").reverse().map((u) => ({ profile: publicProfile(u), stats: this.stats(db, u.id) }));
+  }
+
+  /** Same rules as public.search_freelancers in supabase/schema.sql. */
+  async searchFreelancers(query: string, skills: string[]): Promise<FreelancerMatch[]> {
+    const db = load();
+    this.me(db);
+    const terms = Array.from(new Set(query.toLowerCase().split(/[\s,;]+/).filter((t) => t.length >= 2))).slice(0, 8);
+    const out: FreelancerMatch[] = [];
+    for (const u of db.users) {
+      if (u.role !== "freelancer") continue;
+      const have = (u.skills ?? []).map((k) => k.toLowerCase());
+      if (skills.some((s) => !have.includes(s.toLowerCase()))) continue;
+      const nm = u.fullName.toLowerCase(), hl = u.headline.toLowerCase(), bio = u.bio.toLowerCase();
+      const sk = have.join(" "), rt = (u.resumeText ?? "").toLowerCase(), raw = u.resumeText ?? "";
+      if (!terms.every((t) => `${nm} ${hl} ${sk} ${bio} ${rt}`.includes(t))) continue;
+      const inProfile = terms.every((t) => `${nm} ${hl} ${sk} ${bio}`.includes(t));
+      let score = 0;
+      for (const t of terms) score += (sk.includes(t) ? 3 : 0) + (`${nm} ${hl}`.includes(t) ? 2 : 0) + (bio.includes(t) ? 1 : 0) + (rt.includes(t) ? 1 : 0);
+      let snippet = "";
+      const hits = terms.map((t) => ({ t, i: rt.indexOf(t) })).filter((h) => h.i >= 0).sort((a, b) => a.i - b.i);
+      if (hits.length) {
+        const { t, i } = hits[0];
+        const start = Math.max(0, i - 60), end = Math.min(raw.length, i + t.length + 60);
+        snippet = `${start > 0 ? "…" : ""}${raw.slice(start, end).replace(/\s+/g, " ").trim()}${end < raw.length ? "…" : ""}`;
+      }
+      out.push({ id: u.id, score, matchedIn: terms.length === 0 || inProfile ? "profile" : "resume", snippet });
+    }
+    return out.sort((a, b) => b.score - a.score);
   }
 
   async freelancerReviews(freelancerId: string) {
@@ -224,7 +262,7 @@ export class LocalBackend implements Backend {
     const people: Record<string, Profile> = {};
     for (const p of projects) for (const id of [p.clientId, p.freelancerId]) {
       const u = id && db.users.find((x) => x.id === id);
-      if (u) people[u.id] = publicProfile(u);
+      if (u) people[u.id] = { ...publicProfile(u), email: u.email };
     }
     people[me.id] = (await this.currentProfile())!;
     return {
@@ -241,41 +279,69 @@ export class LocalBackend implements Backend {
     };
   }
 
-  async createProject(d: ProjectDraft) {
-    const db = load();
-    const me = this.me(db);
-    if (me.role !== "client") throw new Error("Only client accounts can create projects");
+  private validateDraft(db: DB, d: ProjectDraft) {
     if (!db.users.some((u) => u.id === d.freelancerId && u.role === "freelancer")) throw new Error("Choose a registered freelancer");
     if (d.title.trim().length < 3) throw new Error("Enter a project title");
     if (d.brief.trim().length < 20) throw new Error("The brief must be at least 20 characters");
     if (!(d.budgetCents > 0)) throw new Error("Enter a budget");
     if (d.milestones.length < 1 || d.milestones.length > 8) throw new Error("A plan needs between 1 and 8 milestones");
+    if (!(d.latePenaltyPerDay >= 0 && d.latePenaltyPerDay <= 100 && d.latePenaltyCap >= 0 && d.latePenaltyCap <= 100)) throw new Error("Late penalty values must be between 0 and 100%");
     const pct = d.milestones.reduce((a, m) => a + m.percent, 0);
     if (Math.abs(pct - 100) > 0.001) throw new Error(`Milestone percentages must total 100% (got ${pct})`);
     for (const m of d.milestones) {
+      if (m.title.trim().length < 2) throw new Error("Every milestone needs a title");
       if (!m.criteria.length) throw new Error("Every milestone needs at least one acceptance criterion");
+      if (m.criteria.some((c) => c.description.trim().length < 2)) throw new Error(`A criterion in "${m.title}" needs a description`);
       const w = m.criteria.reduce((a, c) => a + c.weight, 0);
       if (w !== 100) throw new Error(`Criteria weights in "${m.title}" must total 100% (got ${w})`);
     }
-    const project: Project = {
-      id: uuid(), clientId: me.id, freelancerId: d.freelancerId, title: d.title.trim(), brief: d.brief.trim(),
-      budgetCents: d.budgetCents, status: "draft", authorizationRef: null, authorizedAt: null, completedAt: null, createdAt: now(),
-    };
-    db.projects.push(project);
+  }
+
+  private writePlan(db: DB, projectId: string, d: ProjectDraft) {
     let allocated = 0;
     d.milestones.forEach((m, i) => {
       const amount = i === d.milestones.length - 1 ? d.budgetCents - allocated : Math.floor((d.budgetCents * m.percent) / 100);
       allocated += amount;
       const ms: Milestone = {
-        id: uuid(), projectId: project.id, position: i + 1, title: m.title.trim(), description: m.description, percent: m.percent,
+        id: uuid(), projectId, position: i + 1, title: m.title.trim(), description: m.description, percent: m.percent,
         amountCents: amount, capturedCents: 0, status: "not_started", dueDate: m.dueDate || null, approvedAt: null,
       };
       db.milestones.push(ms);
       m.criteria.forEach((c, j) => db.criteria.push({ id: uuid(), milestoneId: ms.id, position: j + 1, type: c.type, description: c.description.trim(), weight: c.weight, config: c.config }));
     });
+  }
+
+  async createProject(d: ProjectDraft) {
+    const db = load();
+    const me = this.me(db);
+    if (me.role !== "client") throw new Error("Only client accounts can create projects");
+    this.validateDraft(db, d);
+    const project: Project = {
+      id: uuid(), clientId: me.id, freelancerId: d.freelancerId, title: d.title.trim(), brief: d.brief.trim(),
+      budgetCents: d.budgetCents, status: "draft", authorizationRef: null, authorizedAt: null, completedAt: null, createdAt: now(),
+      latePenaltyPerDay: d.latePenaltyPerDay, latePenaltyCap: d.latePenaltyCap, paymentMode: "simulated", authorizationExpiresAt: null,
+    };
+    db.projects.push(project);
+    this.writePlan(db, project.id, d);
     this.log(db, project.id, "project_created", `Project created with ${d.milestones.length} milestones.`);
     save(db);
     return project.id;
+  }
+
+  async updateDraftProject(projectId: string, d: ProjectDraft) {
+    const db = load();
+    const me = this.me(db);
+    const p = db.projects.find((x) => x.id === projectId && x.clientId === me.id);
+    if (!p) throw new Error("Project not found");
+    if (p.status !== "draft") throw new Error("Only unfunded projects can be edited");
+    this.validateDraft(db, d);
+    const old = new Set(db.milestones.filter((m) => m.projectId === p.id).map((m) => m.id));
+    db.milestones = db.milestones.filter((m) => !old.has(m.id));
+    db.criteria = db.criteria.filter((c) => !old.has(c.milestoneId));
+    Object.assign(p, { title: d.title.trim(), brief: d.brief.trim(), budgetCents: d.budgetCents, freelancerId: d.freelancerId, latePenaltyPerDay: d.latePenaltyPerDay, latePenaltyCap: d.latePenaltyCap });
+    this.writePlan(db, p.id, d);
+    this.log(db, p.id, "project_edited", `Plan updated (${d.milestones.length} milestones).`);
+    save(db);
   }
 
   async authorizeProject(projectId: string) {
@@ -288,11 +354,23 @@ export class LocalBackend implements Backend {
     Object.assign(p, { status: "in_progress", authorizationRef: r, authorizedAt: now() });
     const first = db.milestones.find((m) => m.projectId === p.id && m.position === 1);
     if (first) first.status = "in_progress";
-    db.payments.push({ id: uuid(), projectId: p.id, milestoneId: null, kind: "authorization", amountCents: p.budgetCents, reference: r, createdAt: now() });
+    db.payments.push({ id: uuid(), projectId: p.id, milestoneId: null, kind: "authorization", amountCents: p.budgetCents, reference: r, note: "Simulated", createdAt: now() });
     this.log(db, p.id, "authorized", `Funding authorized in PayPal Sandbox (${r}).`);
     save(db);
     return r;
   }
+
+  async settings(): Promise<AppSettings> {
+    return { paypalEnabled: false, paypalClientId: "", currency: "USD", serverGithubChecks: false };
+  }
+
+  async runChecks(_milestoneId: string, repoUrl: string, criteria: Criterion[], onProgress?: (m: string) => void): Promise<CheckOutcome> {
+    return verifyRepository(repoUrl, criteria, { onProgress });
+  }
+
+  async paypalCreateOrder(): Promise<string> { throw new Error("PayPal needs Supabase. Add your Supabase keys to .env first."); }
+  async paypalAuthorize(): Promise<string> { throw new Error("PayPal needs Supabase. Add your Supabase keys to .env first."); }
+  async retryPayout(): Promise<void> { throw new Error("Payouts need PayPal, which needs Supabase."); }
 
   async cancelProject(projectId: string) {
     const db = load();
@@ -302,7 +380,7 @@ export class LocalBackend implements Backend {
     if (p.status === "completed" || p.status === "cancelled") throw new Error("This project is already closed");
     if (p.status === "in_progress") {
       const captured = db.payments.filter((x) => x.projectId === p.id && x.kind === "capture").reduce((a, x) => a + x.amountCents, 0);
-      if (p.budgetCents - captured > 0) db.payments.push({ id: uuid(), projectId: p.id, milestoneId: null, kind: "release", amountCents: p.budgetCents - captured, reference: ref("VOID"), createdAt: now() });
+      if (p.budgetCents - captured > 0) db.payments.push({ id: uuid(), projectId: p.id, milestoneId: null, kind: "release", amountCents: p.budgetCents - captured, reference: ref("VOID"), note: "Unused authorization released", createdAt: now() });
     }
     p.status = "cancelled";
     this.log(db, p.id, "cancelled", "Project cancelled by the client.");
@@ -318,19 +396,19 @@ export class LocalBackend implements Backend {
     if (p.status !== "in_progress") throw new Error("This project is not active");
     if (ms.status !== "in_progress" && ms.status !== "revision_requested") throw new Error("This milestone is not open for submission");
     if (!/^https:\/\/github\.com\/[^/]+\/[^/]+/i.test(i.repoUrl)) throw new Error("Enter a GitHub repository URL");
-    const sub: Submission = { id: uuid(), milestoneId: ms.id, freelancerId: me.id, repoUrl: i.repoUrl, commitSha: i.commitSha, notes: i.notes, createdAt: now() };
+    const sub: Submission = { id: uuid(), milestoneId: ms.id, freelancerId: me.id, repoUrl: i.repoUrl, commitSha: i.commitSha, notes: i.notes, checkedBy: "browser", createdAt: now() };
     db.submissions.push(sub);
     db.verifications.filter((v) => v.milestoneId === ms.id && v.status === "pending_review").forEach((v) => { v.status = "superseded"; });
     const v: Verification = {
-      id: uuid(), submissionId: sub.id, milestoneId: ms.id, scorePercent: 0, proposedCents: 0, status: "pending_review", createdAt: now(), decidedAt: null,
+      id: uuid(), submissionId: sub.id, milestoneId: ms.id, scorePercent: 0, baseCents: 0, daysLate: 0, penaltyPercent: 0, proposedCents: 0, status: "pending_review", createdAt: now(), decidedAt: null,
       results: db.criteria.filter((c) => c.milestoneId === ms.id).map((c) => {
         if (c.type === "MANUAL_REVIEW") return { criterionId: c.id, passed: null, evidence: "Awaiting client review.", source: "manual" as const };
         const r = i.results.find((x) => x.criterionId === c.id);
         return { criterionId: c.id, passed: r?.passed ?? false, evidence: (r?.evidence || "No evidence recorded.").slice(0, 1000), source: "github" as const };
       }),
     };
-    recompute(db, v);
     db.verifications.push(v);
+    recompute(db, v);
     ms.status = "submitted";
     db.revisions.filter((r) => r.milestoneId === ms.id && !r.resolvedAt).forEach((r) => { r.resolvedAt = now(); });
     this.log(db, p.id, "submitted", `Milestone ${ms.position} submitted for verification.`);
@@ -367,7 +445,7 @@ export class LocalBackend implements Backend {
     const captured = () => db.payments.filter((x) => x.projectId === p.id && x.kind === "capture").reduce((a, x) => a + x.amountCents, 0);
     if (captured() + v.proposedCents > p.budgetCents) throw new Error("Release exceeds the remaining authorization");
     const r = ref("CAP");
-    db.payments.push({ id: uuid(), projectId: p.id, milestoneId: ms.id, kind: "capture", amountCents: v.proposedCents, reference: r, createdAt: now() });
+    db.payments.push({ id: uuid(), projectId: p.id, milestoneId: ms.id, kind: "capture", amountCents: v.proposedCents, reference: r, note: v.penaltyPercent > 0 ? `${v.daysLate} day(s) late, −${v.penaltyPercent}%` : "", createdAt: now() });
     Object.assign(v, { status: "approved", decidedAt: now() });
     Object.assign(ms, { status: "approved", capturedCents: v.proposedCents, approvedAt: now() });
     const next = db.milestones.find((m) => m.projectId === p.id && m.position === ms.position + 1);
@@ -375,10 +453,10 @@ export class LocalBackend implements Backend {
     else {
       Object.assign(p, { status: "completed", completedAt: now() });
       const rest = p.budgetCents - captured();
-      if (rest > 0) db.payments.push({ id: uuid(), projectId: p.id, milestoneId: null, kind: "release", amountCents: rest, reference: ref("VOID"), createdAt: now() });
+      if (rest > 0) db.payments.push({ id: uuid(), projectId: p.id, milestoneId: null, kind: "release", amountCents: rest, reference: ref("VOID"), note: "Unused authorization released", createdAt: now() });
       this.log(db, p.id, "completed", "Project completed. Remaining authorization released.");
     }
-    this.log(db, p.id, "captured", `Milestone ${ms.position} approved; ${money(v.proposedCents)} captured (${r}).`);
+    this.log(db, p.id, "captured", `Milestone ${ms.position} approved; ${money(v.proposedCents)} captured${v.penaltyPercent > 0 ? ` after a ${v.penaltyPercent}% late penalty` : ""} (${r}).`);
     save(db);
     return r;
   }

@@ -55,10 +55,19 @@ export const milestoneBadge: Record<MilestoneStatus, { tone: Tone; label: string
 
 export const verificationBadge: Record<VerificationStatus, { tone: Tone; label: string }> = {
   pending_review: { tone: "active", label: "Awaiting decision" },
+  processing: { tone: "active", label: "Payment processing" },
   approved: { tone: "complete", label: "Approved" },
   revision_requested: { tone: "revision", label: "Revision requested" },
   superseded: { tone: "pending", label: "Superseded" },
 };
+
+/** A milestone is overdue when it has a due date in the past and is still waiting on the freelancer. */
+export function isOverdue(m: Milestone) {
+  if (!m.dueDate || (m.status !== "in_progress" && m.status !== "revision_requested")) return false;
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  return m.dueDate < todayStr;
+}
 
 export function personName(ws: Workspace, id: string | null | undefined) {
   return (id && ws.people[id]?.fullName) || "—";

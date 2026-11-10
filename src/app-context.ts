@@ -1,9 +1,10 @@
 import { createContext, useContext } from "react";
-import type { Profile, Workspace } from "./lib/types";
+import type { AppSettings, Profile, Workspace } from "./lib/types";
 
 export type AppCtx = {
   user: Profile;
   ws: Workspace;
+  settings: AppSettings;
   reload: () => Promise<void>;
   setUser: (p: Profile) => void;
   go: (path: string) => void;
