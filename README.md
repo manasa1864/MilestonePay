@@ -1,267 +1,305 @@
 # MilestonePay
 
-Milestone-based payments for software projects. Clients define milestones, authorize the budget once with PayPal, and release payment only after GitHub-backed verification passes. Freelancers submit work against clear acceptance criteria and get paid for what verifies, minus a late penalty if they miss the deadline.
+MilestonePay is a web app for paying freelancers for software work one milestone at a time.
 
-> Uses the **PayPal Sandbox**: test money only. Without PayPal configured, payments are simulated.
+A client describes a project and a budget. The plan is split into milestones, each with acceptance criteria that can be checked against a GitHub repository. The client authorizes the whole budget once through PayPal, which holds the money without sending it. The freelancer submits a repository for each milestone, the app checks it, and the client reviews the result. Money is captured and paid out only when the client approves, and the amount is reduced automatically if the work was late.
 
-## How it works
+All payments use the PayPal Sandbox, which is free test money. No real money is ever involved.
 
-1. **Client** creates a project with a brief, budget, freelancer and **late-delivery penalty** (for example 2% per day late, capped at 20%).
-2. **Claude** (or the built-in planner) drafts a milestone plan from the title, brief and budget, shown with a chart of budget and schedule. The client edits milestones, percentages, **due dates** and weighted acceptance criteria. Drafts stay editable until funded.
-3. **Client** authorizes the full budget with PayPal. The money is held on their PayPal account, not charged. Milestone 01 opens.
-4. **Freelancer** submits a GitHub repository. Checks run against the latest commit on the default branch:
-   - `CI_PASSES`: all GitHub check runs (or the combined status) succeed
-   - `FILE_EXISTS`: a configured file path exists
-   - `PR_MERGED`: at least one PR is merged into the default branch
-   - `MANUAL_REVIEW`: left for the client to judge
-5. **Client** reviews the evidence report, marks client-review criteria, then either:
-   - **approves**, which captures the release amount from the PayPal authorization and pays it out to the freelancer's PayPal; or
-   - **requests a revision**; the freelancer resubmits and every check reruns.
-6. After the final milestone the project completes and PayPal releases whatever wasn't captured. Cancelling a funded project voids the authorization.
-7. Clients can leave one review per project once a payment has been captured.
+## Contents
 
-### Release amount
+1. [Quick start](#quick-start)
+2. [What the app does](#what-the-app-does)
+3. [Environment variables](#environment-variables)
+4. [Full setup (Supabase, PayPal, GitHub, AI)](#full-setup)
+5. [Reference](#reference)
+6. [Project structure](#project-structure)
+7. [Limitations](#limitations)
 
-```
-base      = milestone amount × (weight of passed criteria ÷ total weight)
-days late = submission date − milestone due date   (0 if on time or no due date)
-penalty   = min(cap %, days late × % per day)
-release   = base × (1 − penalty)
+## Quick start
+
+Requirements: Node.js 20 or newer and [pnpm](https://pnpm.io).
+
+```bash
+cp .env.example .env
+# open .env and enter your values (see "Environment variables" below)
+pnpm install
+pnpm dev
 ```
 
-Example: a $500 milestone with 80% of criteria passed, submitted 3 days late at 2%/day (cap 20%), releases $400 × 94% = **$376.00**. Lateness is based on when the freelancer **submits**, so a slow client review never penalizes them. The calculation runs in the database (`recompute_verification`) and is shown on the evidence report.
+The app opens at http://localhost:8443.
 
-## Account types
+On Windows PowerShell, use `copy .env.example .env` instead of `cp`.
+
+What you get depends on what you put in `.env`:
+
+| `.env` contents | Mode | What works |
+| --- | --- | --- |
+| Left as the placeholders | Local mode | The whole app, with data stored in your browser and payments simulated. Good for a first look. |
+| Supabase URL and anon key filled in | Supabase mode | Real accounts and a shared database. You must also run `supabase/schema.sql` once (see [Full setup](#full-setup)). |
+| Supabase values and a PayPal Sandbox Client ID | Supabase mode with PayPal | Real PayPal Sandbox checkout and payouts. This also needs the server-side steps in [Full setup](#full-setup). |
+
+The sidebar shows which mode is active ("Local", "Supabase" or "Supabase + PayPal Sandbox").
+
+## What the app does
+
+### Two kinds of account
 
 | | Client | Freelancer |
 | --- | --- | --- |
-| Navigation | Overview, Projects, Payments, Find freelancers | Overview, My work, Earnings, My profile |
-| Profile | **Company or organisation (required)**, website, what they hire for | Headline, **skills (pick from a searchable list)**, GitHub, bio, portfolio website, resume, **PayPal email for payouts** (**GitHub username and PayPal email are required**; everything else is optional) |
-| Can | Create, edit (before funding), fund and cancel projects; approve releases; request revisions; review freelancers | Submit milestones; see evidence, deadlines and revision requests; get paid out |
+| Sign-up fields | Name, email, password, **company or organisation (required)**, optional website and what they hire for | Name, email, password, headline, skills, **GitHub username (required)**, **PayPal email for payouts (required)**, optional bio, portfolio website and resume |
+| Pages | Overview, Projects, Payments, Find freelancers | Overview, My work, Earnings, My profile |
+| Can do | Create, edit (before funding), fund and cancel projects. Approve payments, request revisions, leave reviews. Search freelancer profiles. | Submit milestones, see check results, deadlines and revision requests, receive payouts. |
 
-## Sign-up rules
+Sign-up rules:
 
-- **GitHub username: required.** The app checks that the account exists on GitHub, so a typo can't be saved.
-- **PayPal email: required**, so every approved milestone can be paid out. For testing, use a PayPal Sandbox personal account email.
-- **Skills** use a search-as-you-type picker with about 600 well-known skills. A skill that isn't in the list can still be added: it appears as an "Add …" option, and pressing Enter adds exactly what was typed.
-- **Clients must enter a company or organisation** (their own name is fine if they work independently).
-- The database enforces these required fields too (`profiles_freelancer_required`, `profiles_client_required`). Accounts created before the rules keep working, but must fill them in before they can save any profile change.
+- The GitHub username is checked against GitHub, so a typo cannot be saved.
+- Skills use a search-as-you-type picker with about 600 common skills. A skill not in the list can still be added as typed. A profile can hold up to 50 skills.
+- There is no email verification. Anyone can sign up and start working immediately.
+- The database enforces the required fields as well as the forms.
 
-## Finding freelancers (client search)
+### The project flow
 
-Every freelancer who signs up shows up under **Find freelancers**. Clients can:
+1. **Create a project.** The client enters a title, a brief, a budget, the freelancer and a late-delivery penalty (for example 2% per day, capped at 20%).
+2. **Get a milestone plan.** A plan is drafted from the title, brief and budget: 2 to 6 milestones, each with a description, a share of the budget, a due date and weighted acceptance criteria. Claude writes it when AI plans are enabled, and a built-in planner is the fallback. The client can edit everything before funding. A chart shows the budget and schedule as the plan is edited.
+3. **Fund the project.** The client authorizes the full budget with PayPal. The money is held on their PayPal account and nothing is charged yet. The first milestone opens.
+4. **Submit work.** The freelancer pastes a GitHub repository URL for the milestone. The checks run against the latest commit on the default branch:
+   - `FILE_EXISTS`: a given file path exists in the repository.
+   - `CI_PASSES`: every GitHub check run on the commit succeeded.
+   - `PR_MERGED`: at least one pull request is merged into the default branch.
+   - `MANUAL_REVIEW`: left for the client to mark Passed or Not passed.
+5. **Review.** The client reads the evidence report and marks any manual criteria. Then they either:
+   - **Approve**, which captures the release amount from the PayPal authorization and pays it to the freelancer's PayPal email, or
+   - **Request a revision**, which sends the freelancer a note. They fix the work and resubmit, and every check runs again.
+6. **Finish.** After the last milestone the project completes and PayPal releases anything not captured. Cancelling a funded project voids the remaining authorization.
+7. **Review the freelancer.** The client can leave one rating and comment per project once a payment has been captured.
 
-- **Search by keyword.** It looks through names, headlines, skills, bios and the **text inside resumes**. Every keyword must match, so `kubernetes terraform` only returns people who have both.
-- **Filter by skill** using the same chip picker freelancers use (it only suggests skills that exist on profiles).
-- **Open a profile** to see skills, bio, GitHub, portfolio, a downloadable resume and reviews. Profiles never show earnings, payments or PayPal emails.
+Nothing is ever paid automatically. Every payment starts with the client pressing Approve.
 
-**How resumes become searchable.** When a freelancer picks a resume, the browser reads its text on the spot (`src/lib/resumeText.ts`):
+### How the payment amount is calculated
+
+```
+base      = milestone amount x (weight of passed criteria / total weight)
+days late = submission date - milestone due date      (0 if on time or no due date)
+penalty   = min(cap %, days late x % per day)
+release   = base x (1 - penalty)
+```
+
+Example: a $500 milestone where criteria worth 80% passed, submitted 3 days late at 2% per day with a 20% cap, releases $400 x 94% = $376.00.
+
+Lateness is measured from when the freelancer submits, so a slow client review never penalizes them. The calculation runs in the database (`recompute_verification`) and is shown on the evidence report before the client approves.
+
+### Finding freelancers
+
+Clients use **Find freelancers** to search every freelancer profile.
+
+- Keyword search covers names, headlines, skills, bios and the text inside resumes. Every keyword must match, so `kubernetes terraform` only returns people who have both.
+- A skill filter uses the same chip picker as the sign-up form.
+- A profile shows skills, bio, GitHub, portfolio, a downloadable resume and reviews. It never shows earnings, payments or PayPal emails.
+
+Resumes become searchable when the freelancer picks the file. The browser reads the text immediately:
 
 | File | Method |
 | --- | --- |
-| PDF with selectable text | read directly with pdf.js |
-| Scanned / image-only PDF | each page is rendered and read with **OCR** (Tesseract.js, first 4 pages) |
-| Word `.docx` | read with mammoth |
-| Old Word `.doc` | can't be read in the browser; the upload works but isn't searchable |
+| PDF with selectable text | Read directly with pdf.js |
+| Scanned or image-only PDF | Pages are rendered and read with OCR (Tesseract.js, first 4 pages) |
+| Word `.docx` | Read with mammoth |
+| Old Word `.doc` | Cannot be read in the browser. The upload works but is not searchable. |
 
-The text (up to 20,000 characters) is stored in `profiles.resume_text`. It never leaves the database except as a short snippet in search results. The OCR language data downloads from a CDN the first time it's used. Resumes uploaded before this feature can be indexed from **Edit profile → Make it searchable**.
+The text (up to 20,000 characters) is stored in `profiles.resume_text` and only appears elsewhere as a short snippet in search results. The OCR language data downloads from a CDN the first time it is used.
 
-## Getting started
+### Charts
 
-```bash
-pnpm install        # or npm install
-pnpm dev            # http://localhost:8443
-```
+- **Plan at a glance** (creating or editing a project): budget per milestone, plus a schedule bar from start to due date.
+- **Milestones at a glance** (project page): each milestone's budget split into captured and not captured, plus its schedule with a line for today.
+- **Captured by project** (Payments): how much of each project's budget has been paid out.
 
-Without Supabase settings the app runs in **local mode**: everything works, but data stays in this browser and payments are simulated. The sidebar shows which mode is active.
+Charts use one colour in two shades checked for contrast in light and dark mode. Status is written as text, values show on hover and keyboard focus, and each chart has a **View as table** option.
 
-## 1. Connect Supabase
+## Environment variables
+
+All variables in `.env` are bundled into the website and are public. Never put a secret in this file.
+
+| Variable | Where to find it | Required |
+| --- | --- | --- |
+| `VITE_SUPABASE_URL` | Supabase project: Project Settings, API, Project URL | For Supabase mode |
+| `VITE_SUPABASE_ANON_KEY` | Same page: anon or publishable key. Never the service-role or secret key. | For Supabase mode |
+| `VITE_PAYPAL_CLIENT_ID` | developer.paypal.com: Apps & Credentials, Sandbox, your app, Client ID | For PayPal checkout |
+
+Restart `pnpm dev` after changing `.env`.
+
+Server-side secrets (PayPal Secret, GitHub token, Anthropic API key) are stored in Supabase and never in `.env`:
+
+| Secret | Used by | Purpose |
+| --- | --- | --- |
+| `PAYPAL_CLIENT_ID` | `paypal` function | Same Client ID as above |
+| `PAYPAL_SECRET` | `paypal` function | PayPal Sandbox Secret |
+| `GITHUB_TOKEN` | `github-verify` function | One GitHub token for server-side checks (optional) |
+| `ANTHROPIC_API_KEY` | `plan-milestones` function | Claude milestone plans (optional) |
+| `PLAN_MODEL`, `PLAN_EFFORT` | `plan-milestones` function | Optional model and effort overrides |
+
+## Full setup
+
+Local mode needs none of this. Follow these steps to get real accounts, PayPal Sandbox payments, server-side GitHub checks and Claude plans.
+
+### 1. Supabase
 
 1. Create a Supabase project.
-2. In **SQL Editor**, run [`supabase/schema.sql`](supabase/schema.sql). It is safe to run more than once.
-3. In `.env` (copy `.env.example`), set the values from **Project Settings → API**:
+2. Open **SQL Editor** and run [supabase/schema.sql](supabase/schema.sql). It is safe to run again after updates.
+3. Put the project URL and anon key in `.env`.
+4. Turn off **Confirm email** under Authentication, Sign In / Providers, Email, so people can sign up and be logged straight in.
+5. Restart `pnpm dev`. The sidebar should say Supabase.
 
-   | Variable | Value |
-   | --- | --- |
-   | `VITE_SUPABASE_URL` | Project URL |
-   | `VITE_SUPABASE_ANON_KEY` | anon / publishable key (never the secret / service-role key) |
+To clear all test accounts and start over, run [supabase/reset-test-data.sql](supabase/reset-test-data.sql) in the SQL editor.
 
-4. Turn off **Confirm email** (Authentication → Sign In / Providers → Email). Anyone can then sign up and is logged straight in.
-5. Restart `pnpm dev`. The sidebar shows **Supabase**.
+### 2. PayPal Sandbox
 
-## 2. PayPal Sandbox
+Create these at developer.paypal.com, under Testing Tools, Sandbox Accounts. Use the same country for all of them (United States works well).
 
-### What you need from developer.paypal.com
+| Account | Role in MilestonePay |
+| --- | --- |
+| **Business** | The merchant your REST app belongs to. It receives captures and sends payouts. Never log into checkout with it. |
+| **Personal (client)** | Log into the PayPal checkout window with this account when funding a project. |
+| **Personal (freelancer)** | Put its email in the freelancer's "PayPal email for payouts". |
 
-| Item | Where | Goes into |
-| --- | --- | --- |
-| **Client ID** | Apps & Credentials → Sandbox → your REST app | `.env` → `VITE_PAYPAL_CLIENT_ID` (public) **and** Supabase secret `PAYPAL_CLIENT_ID` |
-| **Secret** | Same app | Supabase secret `PAYPAL_SECRET` only. Never put it in `.env`. |
-| **Sandbox Business account** | Testing Tools → Sandbox Accounts (created automatically) | Receives captures and sends payouts. It's the account your REST app belongs to. |
-| **Sandbox Personal account(s)** | Same page (one is created automatically; add more if you like) | The **client** logs into PayPal checkout with one. The **freelancer** puts one's email in their profile to receive payouts. |
+Then:
 
-Payouts must be enabled on the sandbox business account. They usually are by default. If payouts fail with a permissions error, enable **Payouts** for the app under Apps & Credentials.
+1. Under Apps & Credentials (Sandbox), create a REST app tied to the Business account. Copy its Client ID and Secret.
+2. Put the Client ID in `.env` as `VITE_PAYPAL_CLIENT_ID`.
+3. Install the Supabase CLI (it cannot be installed with `npm i -g`). On Windows with [Scoop](https://scoop.sh):
 
-### Deploy the Edge Function
+   ```powershell
+   scoop bucket add supabase https://github.com/supabase/scoop-bucket.git
+   scoop install supabase
+   ```
 
-These are terminal commands, run one at a time from the project folder.
+4. Log in, link the project and deploy. The project ref is the part of your Supabase URL before `.supabase.co`.
 
-**1. Install the Supabase CLI once.** It can't be installed with `npm i -g`. On Windows with [Scoop](https://scoop.sh):
+   ```powershell
+   supabase login
+   supabase link --project-ref your-project-ref
+   supabase secrets set PAYPAL_CLIENT_ID=your-client-id PAYPAL_SECRET=your-secret
+   supabase functions deploy paypal
+   ```
 
-```powershell
-scoop bucket add supabase https://github.com/supabase/scoop-bucket.git
-scoop install supabase
-```
+5. Switch PayPal on in the SQL editor:
 
-(Or skip installing and put `npx supabase` wherever these steps say `supabase`.)
+   ```sql
+   update public.app_settings set paypal_enabled = true;
+   ```
 
-**2. Log in and connect this folder to your project.** Your project ref is the part of your Supabase URL before `.supabase.co`:
+6. Restart `pnpm dev`. The funding page now shows PayPal buttons.
 
-```powershell
-supabase login
-supabase link --project-ref your-project-ref
-```
+If PayPal's popup says "You are logging into the account of the seller", you used the Business account. Log out of the popup and sign in with the client Personal account.
 
-**3. Store the PayPal keys on Supabase.** Replace the placeholders with your sandbox Client ID and Secret, without the angle brackets:
+### 3. GitHub checks (optional)
 
-```powershell
-supabase secrets set PAYPAL_CLIENT_ID=your-client-id PAYPAL_SECRET=your-secret
-```
+Without this step, checks run in the freelancer's browser against the public GitHub API with no token. That allows about 60 requests an hour per IP address, works for public repositories only, and a determined freelancer could fake the results.
 
-**4. Upload the function:**
+To run the checks on the server with one token (5,000 requests an hour, results cannot be faked):
 
-```powershell
-supabase functions deploy paypal
-```
-
-Then switch it on in the SQL editor:
-
-```sql
-update public.app_settings set paypal_enabled = true;
-```
-
-Set `VITE_PAYPAL_CLIENT_ID` in `.env` and restart `pnpm dev`. The funding page now shows PayPal buttons.
-
-### Money flow
-
-| Step | PayPal API (server only) | Notes |
-| --- | --- | --- |
-| Fund | `POST /v2/checkout/orders` (intent `AUTHORIZE`), then `POST /v2/checkout/orders/{id}/authorize` | Full budget is held on the client's account. The database checks the amount matches the budget. |
-| Approve milestone | `POST /v2/payments/authorizations/{id}/capture` | Captures the release amount (after late penalty). `final_capture` is set on the last milestone so PayPal releases the rest. A `PayPal-Request-Id` makes retries safe: no double charges. |
-| Pay freelancer | `POST /v1/payments/payouts` | Sends the captured amount to the freelancer's PayPal email. If they haven't added one, the payout waits and can be sent later from the project page. |
-| Cancel | `POST /v2/payments/authorizations/{id}/void` | Releases everything not yet captured. |
-
-**Authorizations last 29 days.** PayPal won't let you capture after that, so keep sandbox test projects' due dates within 29 days. The app warns when they aren't.
-
-## 3. GitHub checks
-
-Without setup, checks run in the freelancer's browser against the public [GitHub REST API](https://docs.github.com/en/rest) with no token. That's about 60 requests an hour per IP, public repositories only, and a determined freelancer could fake the results.
-
-To run them on the server with **one** GitHub token (5,000 requests/hour, results can't be faked):
-
-1. GitHub → Settings → Developer settings → **Fine-grained tokens** → Generate. For public repos, "Public repositories (read-only)" is enough.
+1. On GitHub, go to Settings, Developer settings, Fine-grained tokens, and create a token. "Public repositories (read-only)" is enough for public repos.
 2. Deploy:
 
    ```bash
-   supabase secrets set GITHUB_TOKEN=<token>
+   supabase secrets set GITHUB_TOKEN=your-token
    supabase functions deploy github-verify
    ```
 
 3. In the SQL editor: `update public.app_settings set server_github_checks = true;`
 
-**Testing with friends' repositories:** you don't need their accounts or tokens. Your one token can read any **public** repository. For a **private** repository, the owner adds your GitHub account as a collaborator. Using several accounts' tokens to raise the rate limit is against GitHub's terms, so the app uses a single token.
+One token can read any public repository, so testing with other people's repositories needs no extra accounts. For a private repository, the owner adds your GitHub account as a collaborator. Using several accounts' tokens to raise the limit is against GitHub's terms.
+
+### 4. AI milestone plans (optional)
+
+1. Create an API key at console.anthropic.com and add credits under Billing.
+2. Deploy:
+
+   ```bash
+   supabase secrets set ANTHROPIC_API_KEY=your-key
+   supabase functions deploy plan-milestones
+   ```
+
+3. In the SQL editor: `update public.app_settings set ai_plans_enabled = true;`
+
+Without this, or if the API cannot be reached, the built-in planner is used. It recognises the project type (online shop, mobile app, API, AI/ML, dashboard, automation, game and others), sizes the plan to the budget and sets due dates.
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| Model | `claude-opus-5-5` | Change with the secret `PLAN_MODEL`, for example `claude-sonnet-5-5` or `claude-haiku-5-5` (cheaper). |
+| Effort | `medium` | Secret `PLAN_EFFORT`: `low` is faster, `high` thinks longer. |
+| Daily limit | 20 plans per client per 24 hours | Failed attempts do not count. Set in `supabase/functions/_shared/plan.ts`. |
+| Cost | About $0.05 to $0.10 per plan on Opus 5.5 | Less on Sonnet or Haiku. |
+
+How it works: the `plan-milestones` Edge Function makes one request through the Anthropic SDK using structured outputs (a JSON schema, so the reply is always valid JSON) and server-side fallbacks (the API retries on a fallback model if Claude declines). The project brief is treated as data, not instructions. The reply is then cleaned in code: percentages and criteria weights are made to total exactly 100, file paths must be safe relative paths, and every due date stays within 28 days.
+
+## Reference
+
+### PayPal money flow
+
+All calls are made by the `paypal` Edge Function, never from the browser.
+
+| Step | PayPal API | Notes |
+| --- | --- | --- |
+| Fund | `POST /v2/checkout/orders` (intent `AUTHORIZE`), then `.../authorize` | The full budget is held. The database checks that the amount matches the project budget. |
+| Approve a milestone | `POST /v2/payments/authorizations/{id}/capture` | Captures the release amount after any late penalty. The last milestone uses `final_capture`. A `PayPal-Request-Id` header makes retries safe, so there are no double charges. |
+| Pay the freelancer | `POST /v1/payments/payouts` | Sends the captured amount to the freelancer's PayPal email. If it fails, the payout can be retried from the project page. |
+| Cancel | `POST /v2/payments/authorizations/{id}/void` | Releases everything not yet captured. |
+
+PayPal authorizations last 29 days, so due dates are limited to 28 days from creation.
+
+### GitHub API calls
 
 | Request | Used for |
 | --- | --- |
-| `GET /repos/{owner}/{repo}` | Repository exists; default branch |
-| `GET /repos/{owner}/{repo}/commits/{branch}` | Latest commit SHA that every check runs against |
+| `GET /repos/{owner}/{repo}` | The repository exists; find the default branch |
+| `GET /repos/{owner}/{repo}/commits/{branch}` | The latest commit that every check runs against |
 | `GET .../commits/{sha}/check-runs`, then `.../status` | `CI_PASSES` |
 | `GET .../contents/{path}?ref={sha}` | `FILE_EXISTS` |
 | `GET .../pulls?state=closed&base={branch}` | `PR_MERGED` |
 
-## 4. AI milestone plans (Claude)
+### Database
 
-When a client creates a project, the milestone plan can be written by **Claude** from the project title, brief and budget: 2–6 milestones with titles, descriptions, budget percentages, due dates and acceptance criteria that fit that project. The client reviews and edits everything before funding. Without this set up (or if Claude can't be reached), the **built-in planner** is used instead. It recognises the type of project (online shop, mobile app, API, AI/ML, dashboard, automation, game…), sizes the plan to the budget and sets due dates, so the app always works.
+Defined in [supabase/schema.sql](supabase/schema.sql):
 
-**What you need:** an Anthropic API key from [console.anthropic.com](https://console.anthropic.com) → **API Keys** (add credits under Billing). Keep it secret: it goes in Supabase secrets, never in `.env`.
-
-```powershell
-supabase secrets set ANTHROPIC_API_KEY=your-anthropic-key
-supabase functions deploy plan-milestones
-```
-
-Then switch it on in the SQL editor (after re-running `schema.sql`):
-
-```sql
-update public.app_settings set ai_plans_enabled = true;
-```
-
-| Setting | Default | Notes |
-| --- | --- | --- |
-| Model | `claude-opus-5-5` | Change with the secret `PLAN_MODEL`, e.g. `claude-sonnet-5-5` (cheaper) or `claude-haiku-5-5` (cheapest). |
-| Effort | `medium` | Secret `PLAN_EFFORT`: `low` is faster, `high` thinks longer. |
-| Daily limit | 20 plans per client per 24 h | Failed attempts don't count. Set in `supabase/functions/_shared/plan.ts`. |
-| Cost | roughly $0.05–0.10 per plan on Opus 5.5 | About 1.5K input and 2–4K output tokens; less on Sonnet/Haiku. |
-
-**How it works:** the `plan-milestones` Edge Function sends one request through the official Anthropic SDK with **structured outputs** (a JSON schema, so the answer is always valid JSON) and **server-side fallbacks** (if Claude declines, the API retries on a fallback model automatically). The brief is treated as data, not instructions. The answer is then cleaned up in code: percentages and criteria weights are made to add up to exactly 100, file paths must be safe relative paths, and every due date stays within 28 days (PayPal's 29-day authorization window).
-
-## Charts
-
-- **Plan at a glance** (creating or editing a project): budget per milestone and a schedule bar from start to due date, updating live as you edit.
-- **Milestones at a glance** (project page): each milestone's budget split into captured and not captured, plus its schedule with a "today" line.
-- **Captured by project** (Payments): how much of each project's budget has been paid out.
-
-All charts use one colour in two validated shades (checked for contrast in light and dark mode), write status as text rather than colour, show values on hover and keyboard focus, and have a **View as table** option.
-
-## Secrets: where each value goes
-
-| Value | `.env` (public, bundled into the site) | Supabase secrets (server only) |
-| --- | --- | --- |
-| Supabase URL, anon/publishable key | ✅ | automatic |
-| Supabase service-role / secret key | ❌ never | automatic (`SUPABASE_SERVICE_ROLE_KEY`) |
-| PayPal Client ID | ✅ `VITE_PAYPAL_CLIENT_ID` | ✅ `PAYPAL_CLIENT_ID` |
-| PayPal Secret | ❌ never | ✅ `PAYPAL_SECRET` |
-| GitHub token | ❌ never | ✅ `GITHUB_TOKEN` |
-| Anthropic API key | ❌ never | ✅ `ANTHROPIC_API_KEY` |
-
-## What the SQL sets up
-
-- **Tables:** `app_settings`, `profiles`, `projects`, `milestones`, `criteria`, `submissions`, `verifications`, `verification_results`, `revisions`, `payments`, `reviews`, `activity`
-- **`search_freelancers()`:** the keyword and skill search used by clients; returns ids, a ranking and a snippet from the resume.
-- **Row Level Security** on every table. Users only see projects they're on, and can edit only their own profile's editable columns.
-- **User RPCs:** `create_project`, `update_draft_project`, `authorize_project`*, `submit_milestone`*, `set_manual_result`, `approve_release`*, `request_revision`, `submit_review`, `cancel_project`*, `project_contacts`. The starred ones refuse to run once PayPal or server checks are switched on, so the browser can't bypass them.
-- **Service RPCs (`svc_*`):** callable only with the service-role key, i.e. from the Edge Functions. They record PayPal and GitHub results after the server has verified them.
-- **Views:** `public_profiles` (directory, no email) and `freelancer_stats`.
-- **Storage:** private `resumes` bucket (PDF/Word, 1.5 MB).
+- **Tables:** `app_settings`, `profiles`, `projects`, `milestones`, `criteria`, `submissions`, `verifications`, `verification_results`, `revisions`, `payments`, `reviews`, `activity`, `plan_requests`.
+- **Row Level Security** on every table. Users see only their own projects and can edit only their own profile.
+- **User functions** (`create_project`, `update_draft_project`, `authorize_project`, `submit_milestone`, `set_manual_result`, `approve_release`, `request_revision`, `submit_review`, `cancel_project`, `project_contacts`, `search_freelancers`). Every state change goes through these. The ones that move money refuse to run once PayPal is switched on, so the browser cannot bypass the server.
+- **Service functions** (`svc_*`), callable only with the service-role key from the Edge Functions. They record PayPal, GitHub and AI results after the server has verified them.
+- **Views:** `public_profiles` (the freelancer directory, with no email) and `freelancer_stats`.
+- **Storage:** a private `resumes` bucket for PDF and Word files up to 1.5 MB.
+- **Settings switches** in `app_settings`: `paypal_enabled`, `server_github_checks`, `ai_plans_enabled`.
 
 ## Project structure
 
 ```
 src/
-  App.tsx                  shell, hash router, session, workspace + settings loading
+  App.tsx                  shell, hash router, session, workspace and settings loading
   lib/
     types.ts               domain types and the Backend interface
     backend.ts             picks Supabase or local mode from .env
     supabaseBackend.ts     Supabase implementation (auth, RPCs, storage, Edge Functions)
     localBackend.ts        browser-storage implementation with the same rules
-    paypalSdk.ts           loads the PayPal checkout buttons
-    github.ts              re-exports the shared GitHub checks
+    plan.ts                built-in milestone planner
     skills.ts              skill catalog and typeahead ranking
     resumeText.ts          reads resume text in the browser (pdf.js, OCR, mammoth)
-  charts/                  MilestoneChart (budget + schedule per milestone)
+    githubUser.ts          checks that a GitHub username exists
+    paypalSdk.ts           loads the PayPal checkout buttons
+  charts/                  MilestoneChart (budget and schedule per milestone)
   pages/                   one file per screen
 supabase/
   schema.sql               database schema, security and functions
+  reset-test-data.sql      deletes all test accounts
   functions/
-    paypal/                Edge Function: orders, authorization, capture, payout, void
-    github-verify/         Edge Function: server-side GitHub checks
-    plan-milestones/       Edge Function: Claude writes milestone plans
-    _shared/               PayPal client, GitHub checks, action logic (shared with the browser where possible)
+    paypal/                orders, authorization, capture, payout, void
+    github-verify/         server-side GitHub checks
+    plan-milestones/       Claude milestone plans
+    _shared/               PayPal client, GitHub checks, plan logic, shared by the functions
 ```
 
-## Limitations and next steps
+## Limitations
 
-- **Email:** no email verification or password reset yet.
-- **Long projects:** PayPal authorizations expire after 29 days. Longer projects would need re-authorization or one order per milestone.
-- **AI plans:** Claude writes the plan only when `ai_plans_enabled` is on and the `plan-milestones` function is deployed with an API key; otherwise the built-in planner is used.
-- **Live PayPal:** switching from sandbox to live needs live credentials and `PAYPAL_API_BASE=https://api-m.paypal.com` as a secret.
+- No email verification or password reset.
+- PayPal authorizations expire after 29 days, so projects longer than that would need re-authorization or one order per milestone.
+- The automatic checks look at whether files, CI runs and merged pull requests exist. They cannot judge the content of a file, so content-level criteria use the client-review option.
+- Switching from Sandbox to live PayPal needs live credentials and the secret `PAYPAL_API_BASE=https://api-m.paypal.com`. Do not set this for testing.
