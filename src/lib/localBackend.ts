@@ -4,9 +4,10 @@
  * same either way. Data lives in localStorage on this device only.
  */
 import { verifyRepository } from "./github";
+import { suggestPlan } from "./plan";
 import type {
-  Activity, AppSettings, Backend, CheckOutcome, Criterion, FreelancerMatch, FreelancerStats, Milestone, Payment, Profile, ProfileInput, Project, ProjectDraft,
-  ResumeChange, ResumeRef, Review, Revision, SignUpInput, SignUpResult, Submission, SubmissionInput, Verification, Workspace,
+  Activity, AppSettings, Backend, CheckOutcome, GeneratedPlan, Criterion, FreelancerMatch, FreelancerStats, Milestone, Payment, Profile, ProfileInput, Project, ProjectDraft,
+  ResumeChange, ResumeRef, Review, Revision, Role, SignUpInput, SignUpResult, Submission, SubmissionInput, Verification, Workspace,
 } from "./types";
 
 const DB_KEY = "mp-db";
@@ -101,6 +102,17 @@ function publicProfile(u: StoredUser): Profile {
 }
 
 /** Same formula as public.recompute_verification in supabase/schema.sql. */
+/** Clients must have a company; freelancers a GitHub username and PayPal email (also enforced by the database). */
+function requireFreelancerFields(role: Role, p: { githubUsername: string; paypalEmail: string; company: string }) {
+  if (role === "client") {
+    if (!p.company.trim()) throw new Error("A company or organisation name is required for clients.");
+    return;
+  }
+  if (!p.githubUsername.trim()) throw new Error("A GitHub username is required for freelancers.");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(p.paypalEmail.trim())) throw new Error("A valid PayPal email is required for freelancers.");
+}
+
+/** Same formula as public.recompute_verification in supabase/schema.sql. */
 function recompute(db: DB, v: Verification) {
   const ms = db.milestones.find((m) => m.id === v.milestoneId)!;
   const project = db.projects.find((p) => p.id === ms.projectId)!;
@@ -155,6 +167,7 @@ export class LocalBackend implements Backend {
     const db = load();
     const email = input.email.trim().toLowerCase();
     if (db.users.some((u) => u.email === email)) throw new Error("An account with this email already exists. Log in instead.");
+    requireFreelancerFields(input.role, input);
     const resume = input.resumeFile ? await resumeFromFile(input.resumeFile) : null;
     const user: StoredUser = {
       id: uuid(), role: input.role, fullName: input.fullName, email, company: input.company, headline: input.headline,
@@ -189,6 +202,7 @@ export class LocalBackend implements Backend {
   async updateProfile(input: ProfileInput, resume: ResumeChange, resumeText?: string) {
     const db = load();
     const u = this.me(db);
+    requireFreelancerFields(u.role, input);
     Object.assign(u, input);
     if (resume instanceof File) u.resume = await resumeFromFile(resume);
     else if (resume === null) { u.resume = null; u.resumeText = ""; }
@@ -361,7 +375,11 @@ export class LocalBackend implements Backend {
   }
 
   async settings(): Promise<AppSettings> {
-    return { paypalEnabled: false, paypalClientId: "", currency: "USD", serverGithubChecks: false };
+    return { paypalEnabled: false, paypalClientId: "", currency: "USD", serverGithubChecks: false, aiPlans: false };
+  }
+
+  async generatePlan(input: { title: string; brief: string; budgetCents: number }): Promise<GeneratedPlan> {
+    return { milestones: suggestPlan(input), summary: "", source: "builtin" };
   }
 
   async runChecks(_milestoneId: string, repoUrl: string, criteria: Criterion[], onProgress?: (m: string) => void): Promise<CheckOutcome> {

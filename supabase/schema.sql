@@ -68,13 +68,16 @@ alter type public.payment_kind add value if not exists 'payout';
 -- Settings (single row). Flip these after deploying the Edge Functions:
 --   update public.app_settings set paypal_enabled = true;        -- real PayPal Sandbox
 --   update public.app_settings set server_github_checks = true;  -- GitHub checks on the server
+--   update public.app_settings set ai_plans_enabled = true;      -- Claude writes the milestone plans
 -- -----------------------------------------------------------------------------
 create table if not exists public.app_settings (
   id                    boolean primary key default true check (id),
   paypal_enabled        boolean not null default false,
   server_github_checks  boolean not null default false,
+  ai_plans_enabled      boolean not null default false,
   currency              text not null default 'USD'
 );
+alter table public.app_settings add column if not exists ai_plans_enabled boolean not null default false;
 insert into public.app_settings (id) values (true) on conflict (id) do nothing;
 
 -- -----------------------------------------------------------------------------
@@ -106,6 +109,19 @@ alter table public.profiles add column if not exists paypal_email text not null 
 alter table public.profiles add column if not exists resume_text text not null default '';
 do $$ begin
   alter table public.profiles add constraint profiles_resume_text_len check (char_length(resume_text) <= 20000);
+exception when duplicate_object then null; end $$;
+
+-- Freelancers must have a GitHub username and a PayPal email. NOT VALID means accounts that already
+-- exist are left alone, but new sign-ups and any later edit must satisfy it.
+-- Clients must name their company or organisation (same NOT VALID rule: existing accounts are left alone).
+do $$ begin
+  alter table public.profiles add constraint profiles_client_required
+    check (role <> 'client' or btrim(company) <> '') not valid;
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+  alter table public.profiles add constraint profiles_freelancer_required
+    check (role <> 'freelancer' or (btrim(github_username) <> '' and btrim(paypal_email) <> '')) not valid;
 exception when duplicate_object then null; end $$;
 do $$ begin
   alter table public.profiles add constraint profiles_paypal_email check (paypal_email = '' or paypal_email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$');
@@ -242,6 +258,17 @@ create table if not exists public.reviews (
   unique (project_id, client_id)
 );
 create index if not exists reviews_freelancer_idx on public.reviews (freelancer_id);
+
+-- One row per AI plan request. Only the Edge Function (service role) reads or writes it:
+-- it is how the daily limit per client is enforced.
+create table if not exists public.plan_requests (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.profiles (id) on delete cascade,
+  created_at  timestamptz not null default now()
+);
+create index if not exists plan_requests_user_idx on public.plan_requests (user_id, created_at desc);
+alter table public.plan_requests enable row level security;
+revoke all on public.plan_requests from anon, authenticated;
 
 create table if not exists public.activity (
   id          uuid primary key default gen_random_uuid(),
@@ -462,6 +489,10 @@ $$;
 
 create or replace function public.setting_paypal() returns boolean language sql stable security definer set search_path = public as $$
   select coalesce((select paypal_enabled from public.app_settings where id), false);
+$$;
+
+create or replace function public.setting_ai_plans() returns boolean language sql stable security definer set search_path = public as $$
+  select coalesce((select ai_plans_enabled from public.app_settings where id), false);
 $$;
 
 create or replace function public.setting_server_checks() returns boolean language sql stable security definer set search_path = public as $$
@@ -1016,6 +1047,29 @@ begin
   perform public.mp_cancel(p_actor, p_project_id, p_void_ref);
 end $$;
 
+-- AI plans: count this request against the client's daily limit (raises when it is used up).
+create or replace function public.svc_plan_consume(p_actor uuid, p_limit int default 20)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare used int; rid uuid;
+begin
+  if not public.setting_ai_plans() then raise exception 'AI milestone plans are not switched on'; end if;
+  if not exists (select 1 from public.profiles where id = p_actor and role = 'client') then
+    raise exception 'Only client accounts can generate milestone plans';
+  end if;
+  select count(*) into used from public.plan_requests where user_id = p_actor and created_at > now() - interval '24 hours';
+  if used >= p_limit then
+    raise exception 'You have used all % AI plans for today. Edit the current plan or try again tomorrow.', p_limit;
+  end if;
+  insert into public.plan_requests (user_id) values (p_actor) returning id into rid;
+  return rid;
+end $$;
+
+-- AI plans: give the request back when generation failed (so errors don't use up the limit).
+create or replace function public.svc_plan_release(p_request_id uuid)
+returns void language sql security definer set search_path = public as $$
+  delete from public.plan_requests where id = p_request_id;
+$$;
+
 -- GitHub: criteria to check for a milestone (validates the freelancer).
 create or replace function public.svc_github_context(p_actor uuid, p_milestone_id uuid)
 returns table (criterion_id uuid, type text, description text, weight int, config jsonb)
@@ -1085,6 +1139,8 @@ grant execute on function
   public.svc_payout_info(uuid, uuid),
   public.svc_paypal_begin_cancel(uuid, uuid),
   public.svc_paypal_finish_cancel(uuid, uuid, text),
+  public.svc_plan_consume(uuid, int),
+  public.svc_plan_release(uuid),
   public.svc_github_context(uuid, uuid),
   public.svc_github_submit(uuid, uuid, text, text, text, jsonb)
   to service_role;

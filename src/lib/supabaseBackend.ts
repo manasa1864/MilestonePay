@@ -1,7 +1,8 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { verifyRepository } from "./github";
+import { draftsFromPlan, suggestPlan } from "./plan";
 import type {
-  Activity, AppSettings, Backend, CheckOutcome, Criterion, FreelancerMatch, FreelancerStats, Milestone, Payment, Profile, ProfileInput, Project, ProjectDraft,
+  Activity, AppSettings, Backend, CheckOutcome, CriterionType, GeneratedPlan, Criterion, FreelancerMatch, FreelancerStats, Milestone, Payment, Profile, ProfileInput, Project, ProjectDraft,
   ResumeChange, ResumeRef, Review, Revision, SignUpInput, SignUpResult, Submission, SubmissionInput, Verification, Workspace,
 } from "./types";
 
@@ -104,7 +105,7 @@ export class SupabaseBackend implements Backend {
   }
 
   /** Calls an Edge Function and turns its JSON error into a readable Error. */
-  private async edge<T>(name: "paypal" | "github-verify", body: Row): Promise<T> {
+  private async edge<T>(name: "paypal" | "github-verify" | "plan-milestones", body: Row): Promise<T> {
     const { data, error } = await this.sb.functions.invoke(name, { body });
     if (error) {
       let message = error.message;
@@ -129,9 +130,23 @@ export class SupabaseBackend implements Backend {
       paypalClientId,
       currency: data?.currency ?? "USD",
       serverGithubChecks: !!data?.server_github_checks,
+      aiPlans: !!data?.ai_plans_enabled,
     };
     this.settingsCache = { at: Date.now(), value };
     return value;
+  }
+
+  async generatePlan(input: { title: string; brief: string; budgetCents: number }): Promise<GeneratedPlan> {
+    const builtin = (note?: string): GeneratedPlan => ({ milestones: suggestPlan(input), summary: "", source: "builtin", note });
+    if (!(await this.settings()).aiPlans) return builtin();
+    try {
+      type Out = { summary: string; milestones: { title: string; description: string; percent: number; dueInDays: number; criteria: { type: CriterionType; description: string; weight: number; config: { path?: string } }[] }[] };
+      const out = await this.edge<Out>("plan-milestones", { action: "generate", ...input });
+      return { milestones: draftsFromPlan(out.milestones), summary: out.summary, source: "claude" };
+    } catch (e) {
+      // Never leave the client without a plan: fall back to the built-in planner and say why.
+      return builtin(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async runChecks(milestoneId: string, repoUrl: string, criteria: Criterion[], onProgress?: (m: string) => void): Promise<CheckOutcome> {

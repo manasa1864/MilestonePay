@@ -3,6 +3,7 @@ import { useApp } from "../app-context";
 import { backend, supabaseConfigured } from "../lib/backend";
 import { errorText } from "../lib/format";
 import { Button, Notice, PageHeader } from "../ui";
+import { githubUserExists } from "../lib/githubUser";
 import { draftBusy, draftErrors, draftFrom, draftToInput, ProfileFields, resumeChange, resumeTextChange, type ProfileDraft } from "./ProfileFields";
 
 export function Settings() {
@@ -19,10 +20,15 @@ export function Settings() {
     setAttempted(true);
     setMessage(null);
     if (name.trim().length < 2) { setMessage({ ok: false, text: "Enter your full name." }); return; }
-    const problem = draftErrors(draft);
+    const problem = draftErrors(draft, user.role);
     if (problem) { setMessage({ ok: false, text: problem }); return; }
     setBusy(true);
     try {
+      const gh = draft.github.trim().replace(/^@/, "");
+      if (user.role === "freelancer" && gh.toLowerCase() !== user.githubUsername.toLowerCase() && (await githubUserExists(gh)) === false) {
+        setMessage({ ok: false, text: `We couldn’t find a GitHub account named “${gh}”. Check the spelling.` });
+        return;
+      }
       const updated = await backend.updateProfile(draftToInput(name, draft), resumeChange(draft), resumeTextChange(draft));
       setUser(updated);
       setDraft(draftFrom(updated));

@@ -1,6 +1,7 @@
 import { useApp } from "../app-context";
 import { date, money as fmt, pad } from "../lib/format";
-import { money } from "../lib/select";
+import { money, projectBadge } from "../lib/select";
+import { MilestoneChart } from "../charts/MilestoneChart";
 import { Empty, PageHeader, StatusBadge } from "../ui";
 
 function CaptureChart({ points }: { points: { t: number; v: number }[] }) {
@@ -14,7 +15,8 @@ function CaptureChart({ points }: { points: { t: number; v: number }[] }) {
   let d = `M${x(series[0].t)} ${y(0)}`;
   for (let i = 1; i < series.length; i++) d += ` L${x(series[i].t)} ${y(series[i - 1].v)} L${x(series[i].t)} ${y(series[i].v)}`;
   d += ` L${W} ${y(series[series.length - 1].v)}`;
-  const labels = [t0, t0 + (t1 - t0) / 2, t1].map((t) => new Date(t).toLocaleDateString("en-US", { month: "short", day: "2-digit" }));
+  // Never print the same date twice (a short range would repeat the middle label).
+  const labels = Array.from(new Set([t0, t0 + (t1 - t0) / 2, t1].map((t) => new Date(t).toLocaleDateString("en-US", { month: "short", day: "2-digit" }))));
   return <div className="line-chart"><div className="grid-lines"><i/><i/><i/><i/></div><svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="Cumulative captured payments"><path d={`${d} L${W} ${H} L0 ${H}Z`} fill="url(#fade)"/><path d={d} fill="none" stroke="currentColor" strokeWidth="2.2" vectorEffect="non-scaling-stroke"/><defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="currentColor" stopOpacity=".14"/><stop offset="1" stopColor="currentColor" stopOpacity="0"/></linearGradient></defs></svg><div className="chart-labels">{labels.map((l, i) => <span key={i}>{l}</span>)}</div></div>;
 }
 
@@ -36,6 +38,10 @@ export function Payments() {
   return <><PageHeader title={client ? "Payments" : "Earnings"} subtitle={client ? "Authorization and capture activity across your projects." : "Payments captured for your approved milestones."} action={<span className="sandbox-pill">{anyPayPal ? "PAYPAL SANDBOX" : "SIMULATED"}</span>}/>
     <section className="metrics">{metrics.map(([l, v, n]) => <div className="metric" key={l}><span>{l}</span><strong>{v}</strong><small>{n}</small></div>)}</section>
     <section className="chart-panel"><div className="section-heading"><div><h2>{client ? "Captured payment activity" : "Earnings over time"}</h2><p>Cumulative captures</p></div><strong className="mono">{fmt(t.captured)}</strong></div><CaptureChart points={points}/></section>
+    {ws.projects.some((p) => p.status !== "draft") && <section className="chart-card"><div className="section-heading"><div><h2>Captured by project</h2><p>How much of each project’s budget has been paid out so far</p></div></div>
+      <MilestoneChart mode="progress" showSchedule={false} amountLabel="Budget" legend={["Captured", "Not captured"]} label="Captured amount for each project"
+        rows={ws.projects.filter((p) => p.status !== "draft").map((p) => ({ key: p.id, label: p.title, sub: projectBadge(ws, p).label, amountCents: p.budgetCents, capturedCents: money(ws, p.id).captured }))}/>
+    </section>}
     <section className="section-block"><div className="section-heading"><div><h2>Payment history</h2><p>All authorization, capture and release events</p></div></div>
       {ws.payments.length === 0 ? <Empty title="No payment activity yet">{client ? "Authorize a project to see it here." : "Payments appear once a client funds a project with you."}</Empty>
         : <div className="table-wrap"><table><thead><tr><th>Date</th><th>Project</th><th>Milestone</th><th>Amount</th><th>Type</th><th>Reference</th></tr></thead><tbody>{ws.payments.map((p) => {

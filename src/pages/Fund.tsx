@@ -44,7 +44,17 @@ function PayPalButtons({ projectId, onDone }: { projectId: string; onDone: () =>
     {state === "working" && <div className="loading-row light"><Spinner/> Confirming authorization…</div>}
     <div ref={ref} className={state === "working" ? "hidden" : ""}/>
     {error && <p className="checkout-error">{error}</p>}
-    <small className="centered">Log in with a <b>PayPal Sandbox personal</b> account. The full budget is authorized, not charged.</small>
+    <small className="centered">Test mode: no real money moves. The full budget is authorized, not charged.</small>
+    <details className="sandbox-help">
+      <summary>Which PayPal login do I use?</summary>
+      <ol>
+        <li>Don’t use your real PayPal account, and don’t make up an email. PayPal only accepts test accounts it created for you.</li>
+        <li>Open <a href="https://developer.paypal.com/dashboard/accounts" target="_blank" rel="noreferrer noopener">developer.paypal.com → Testing Tools → Sandbox Accounts</a> (make sure <b>Sandbox</b> is selected).</li>
+        <li>Next to the <b>Personal</b> account click <b>⋯ → View/Edit account</b>. Copy its <b>Email</b> and <b>System generated password</b>.</li>
+        <li>Paste those into this PayPal window. The address bar should say <b>sandbox.paypal.com</b>.</li>
+        <li>If it asks for a card, use <b>Testing Tools → Credit Card Generator</b>, not a real card.</li>
+      </ol>
+    </details>
   </div>;
 }
 

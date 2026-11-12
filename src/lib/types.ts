@@ -208,6 +208,17 @@ export type AppSettings = {
   currency: string;
   /** GitHub checks run in the `github-verify` Edge Function with a server token. */
   serverGithubChecks: boolean;
+  /** Claude writes milestone plans through the `plan-milestones` Edge Function. */
+  aiPlans: boolean;
+};
+
+/** A milestone plan ready for the editor, and who wrote it. */
+export type GeneratedPlan = {
+  milestones: MilestoneDraft[];
+  summary: string;
+  source: "claude" | "builtin";
+  /** Why the built-in planner was used instead of Claude, when Claude was tried. */
+  note?: string;
 };
 
 export type CheckOutcome = { commitSha: string; defaultBranch: string; results: { criterionId: string; passed: boolean; evidence: string }[] };
@@ -233,6 +244,8 @@ export interface Backend {
   loadWorkspace(): Promise<Workspace>;
 
   settings(): Promise<AppSettings>;
+  /** Drafts a milestone plan from the title, brief and budget (Claude when switched on, else the built-in planner). */
+  generatePlan(input: { title: string; brief: string; budgetCents: number }): Promise<GeneratedPlan>;
   runChecks(milestoneId: string, repoUrl: string, criteria: Criterion[], onProgress?: (m: string) => void): Promise<CheckOutcome>;
   paypalCreateOrder(projectId: string): Promise<string>;
   paypalAuthorize(projectId: string, orderId: string): Promise<string>;

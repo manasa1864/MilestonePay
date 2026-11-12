@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { act, useApp } from "../app-context";
 import { backend } from "../lib/backend";
 import { errorText, initials, money as fmt, pad } from "../lib/format";
-import { criterionLabels, newCriterion, rebalanceWeights, suggestPlan } from "../lib/plan";
+import { criterionLabels, dateInDays, newCriterion, rebalanceWeights, suggestPlan } from "../lib/plan";
+import { MilestoneChart, type ChartRow } from "../charts/MilestoneChart";
 import { criteriaOf, milestonesOf } from "../lib/select";
 import type { CriterionType, FreelancerStats, MilestoneDraft, Profile } from "../lib/types";
 import { Button, Empty, Icon, Notice, PageHeader, Spinner, StatusBadge } from "../ui";
@@ -48,6 +49,9 @@ export function CreateProject({ preselect, editId }: { preselect?: string; editI
     criteria: criteriaOf(ws, m.id).map((c) => ({ type: c.type, description: c.description, weight: c.weight, config: c.config })),
   })) : []);
   const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [planMeta, setPlanMeta] = useState<{ source: "claude" | "builtin"; summary: string; note?: string } | null>(null);
+  const planJob = useRef(0);
 
   useEffect(() => {
     backend.listFreelancers().then(setFreelancers).catch((e) => { setLoadError(errorText(e)); setFreelancers([]); });
@@ -61,12 +65,30 @@ export function CreateProject({ preselect, editId }: { preselect?: string; editI
   const problems = planProblems(plan);
   const chosen = freelancers?.find((f) => f.profile.id === freelancerId)?.profile;
 
+  /** Asks for a plan (Claude when AI plans are on, otherwise the built-in planner). */
+  async function makePlan() {
+    const job = ++planJob.current;
+    setGenerating(true);
+    const res = await backend.generatePlan({ title: title.trim(), brief: brief.trim(), budgetCents });
+    if (job !== planJob.current) return; // the user skipped or asked again meanwhile
+    setPlan(res.milestones);
+    setPlanMeta({ source: res.source, summary: res.summary, note: res.note });
+    setGenerating(false);
+  }
+  /** Skip waiting for Claude and use the built-in planner right away. */
+  function useBuiltin() {
+    planJob.current++;
+    setPlan(suggestPlan({ title, brief, budgetCents }));
+    setPlanMeta({ source: "builtin", summary: "" });
+    setGenerating(false);
+  }
+
   function next(e: FormEvent) {
     e.preventDefault();
     setAttempted(true);
     if (!step1Valid) return;
-    if (!plan.length) setPlan(suggestPlan(`${title} ${brief}`));
     setStep(2);
+    if (!plan.length) void makePlan();
     window.scrollTo({ top: 0 });
   }
 
@@ -110,15 +132,34 @@ export function CreateProject({ preselect, editId }: { preselect?: string; editI
               <div className="picker">{list.map(({ profile: f, stats }) => <button type="button" key={f.id} className={freelancerId === f.id ? "active" : ""} onClick={() => setFreelancerId(f.id)}><span className="avatar">{initials(f.fullName)}</span><span><b>{f.fullName}</b><small>{f.headline || "Freelancer"}{stats.verifiedMilestones ? ` · ${stats.verifiedMilestones} verified milestones` : ""}</small>{f.skills.length > 0 && <em>{f.skills.slice(0, 4).join(" · ")}</em>}</span>{freelancerId === f.id && <Icon name="check" size={16}/>}</button>)}{list.length === 0 && <p className="empty-note">No freelancers match “{search}”.</p>}</div></>}
           {attempted && !freelancerId && <small className="error-text">Choose a freelancer.</small>}
         </div>
-        <div className="ai-note"><span className="ai-mark">PLAN</span><p><b>Suggested milestone plan</b><br/>MilestonePay drafts 2–5 priced milestones with checkable acceptance criteria from your brief. You can edit everything until you authorize funding.</p></div>
+        <div className="ai-note"><span className="ai-mark">{settings.aiPlans ? "AI" : "PLAN"}</span><p><b>{settings.aiPlans ? "Milestone plan written by Claude" : "Suggested milestone plan"}</b><br/>{settings.aiPlans ? "Claude reads your title, brief and budget and drafts 2–6 priced milestones with due dates and checkable acceptance criteria." : "MilestonePay drafts priced milestones with due dates and checkable acceptance criteria from the type of project in your brief."} You can edit everything until you authorize funding.</p></div>
         <div className="form-actions"><Button kind="secondary" onClick={() => go(editing ? `/project/${editing.id}` : "/overview")}>Cancel</Button><Button type="submit">Continue to milestone plan <Icon name="arrow" size={16}/></Button></div>
       </form>
     </div>;
   }
 
+  if (generating) return <><PageHeader eyebrow={stepLabel(2)} title="Review milestone plan" subtitle="Drafting milestones from your title, brief and budget."/>
+    <div className="plan-loading" role="status"><Spinner dark/><b>{settings.aiPlans ? "Claude is planning your milestones…" : "Drafting your plan…"}</b><p>{settings.aiPlans ? "It reads the brief, splits the work into milestones, prices each one and sets due dates and acceptance criteria. This usually takes 10–40 seconds." : "One moment."}</p>
+      {settings.aiPlans && <Button kind="secondary" onClick={useBuiltin}>Use the built-in plan instead</Button>}</div></>;
+
   const pct = plan.reduce((a, m) => a + (Number(m.percent) || 0), 0);
+  // Chart rows: the same amounts the editor shows, each milestone starting when the previous one is due.
+  const chartRows: ChartRow[] = (() => {
+    let used = 0;
+    let prevDue = dateInDays(0);
+    return plan.map((m, i) => {
+      const amount = i === plan.length - 1 ? budgetCents - used : Math.floor((budgetCents * (Number(m.percent) || 0)) / 100);
+      used += amount;
+      const start = prevDue;
+      if (m.dueDate) prevDue = m.dueDate;
+      return { key: String(i), label: `${pad(i + 1)} · ${m.title || "Untitled milestone"}`, amountCents: Math.max(0, amount), start, due: m.dueDate || null, sub: `${m.criteria.length} acceptance criteria` };
+    });
+  })();
   let allocated = 0;
-  return <><PageHeader eyebrow={stepLabel(2)} title="Review milestone plan" subtitle="Edit milestones, amounts and acceptance criteria. Payments are released per milestone based on the criteria that pass." action={<StatusBadge tone="pending">Suggested plan</StatusBadge>}/>
+  return <><PageHeader eyebrow={stepLabel(2)} title="Review milestone plan" subtitle="Edit milestones, amounts and acceptance criteria. Payments are released per milestone based on the criteria that pass." action={<StatusBadge tone={planMeta?.source === "claude" ? "active" : "pending"}>{planMeta?.source === "claude" ? "Planned by Claude" : "Suggested plan"}</StatusBadge>}/>
+    {planMeta?.source === "claude" && <div className="plan-ai"><span className="ai-mark">AI</span><div><b>Claude’s plan for “{title}”</b><p>{planMeta.summary || "Milestones, amounts, due dates and acceptance criteria drafted from your brief."} Check every milestone before funding: you can change anything below.</p></div></div>}
+    {planMeta?.note && <Notice tone="warn"><b>Claude couldn’t plan this one, so this is the built-in plan.</b> {planMeta.note}</Notice>}
+    {plan.length > 0 && <section className="chart-card"><div className="section-heading"><div><h2>Plan at a glance</h2><p>Budget per milestone and when each one is due. Updates as you edit.</p></div></div><MilestoneChart rows={chartRows} mode="plan" label={`Milestone plan for ${title}: ${plan.length} milestones`}/></section>}
     <div className="plan-summary"><div><span>Project</span><b>{title}</b></div><div><span>Total budget</span><b className="mono">{fmt(budgetCents)}</b></div><div><span>Freelancer</span><b>{chosen?.fullName ?? "—"}</b></div><div><span>Allocated</span><b className={Math.abs(pct - 100) < 0.001 ? "good" : "bad"}>{pct}%</b></div></div>
     <div className="plan-list">{plan.map((m, i) => {
       const amount = i === plan.length - 1 ? budgetCents - allocated : Math.floor((budgetCents * (Number(m.percent) || 0)) / 100);
@@ -146,7 +187,7 @@ export function CreateProject({ preselect, editId }: { preselect?: string; editI
     {settings.paypalEnabled && plan.some((m) => m.dueDate && Date.parse(m.dueDate) > Date.now() + 29 * 86_400_000) && <Notice tone="warn"><b>Some due dates are more than 29 days away.</b> PayPal authorizations expire after 29 days, so milestones approved after that can’t be captured from this authorization. Keep sandbox test projects within 29 days.</Notice>}
     <Notice tone="info">Late penalty: {perDay > 0 && cap > 0 ? `${perDay}% per day late, capped at ${cap}%` : "none"}. It’s based on the date the freelancer submits compared with each milestone’s due date.</Notice>
     {problems.length > 0 && <Notice tone="warn"><b>Fix these before continuing</b><ul>{problems.slice(0, 6).map((p) => <li key={p}>{p}</li>)}</ul></Notice>}
-    <div className="sticky-actions"><div><b>{problems.length ? "Plan needs attention" : "Plan is ready"}</b><small>Amounts are calculated from the {fmt(budgetCents)} budget. The last milestone absorbs rounding.</small></div><Button kind="secondary" onClick={() => setStep(1)}>Back</Button><Button kind="secondary" onClick={() => setPlan(suggestPlan(`${title} ${brief}`))}>Reset to suggestion</Button><Button onClick={create} disabled={problems.length > 0 || saving}>{saving ? "Saving…" : <>{editing ? "Save changes" : "Create project"} <Icon name="arrow" size={16}/></>}</Button></div>
+    <div className="sticky-actions"><div><b>{problems.length ? "Plan needs attention" : "Plan is ready"}</b><small>Amounts are calculated from the {fmt(budgetCents)} budget. The last milestone absorbs rounding.</small></div><Button kind="secondary" onClick={() => setStep(1)}>Back</Button><Button kind="secondary" onClick={() => void makePlan()}>{settings.aiPlans ? "Regenerate with Claude" : "Reset to suggestion"}</Button><Button onClick={create} disabled={problems.length > 0 || saving}>{saving ? "Saving…" : <>{editing ? "Save changes" : "Create project"} <Icon name="arrow" size={16}/></>}</Button></div>
   </>;
 }
 

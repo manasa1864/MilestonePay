@@ -3,6 +3,7 @@ import { backend, supabaseConfigured } from "../lib/backend";
 import { errorText } from "../lib/format";
 import type { Profile, Role } from "../lib/types";
 import { Button, Icon } from "../ui";
+import { githubUserExists } from "../lib/githubUser";
 import { draftBusy, draftErrors, draftFrom, draftToInput, ProfileFields, type ProfileDraft } from "./ProfileFields";
 
 const copy: Record<Role, { statement: ReactNode; text: string; proof: [string, string][] }> = {
@@ -29,7 +30,7 @@ export function AuthScreen({ onAuth }: { onAuth: (p: Profile) => void }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const c = copy[role];
-  const valid = email.includes("@") && password.length >= 6 && (mode === "login" || (name.trim().length > 1 && !draftErrors(draft)));
+  const valid = email.includes("@") && password.length >= 6 && (mode === "login" || (name.trim().length > 1 && !draftErrors(draft, role)));
 
   function switchMode(m: "login" | "signup") { setMode(m); setError(""); setAttempted(false); }
 
@@ -43,6 +44,10 @@ export function AuthScreen({ onAuth }: { onAuth: (p: Profile) => void }) {
       if (mode === "login") {
         onAuth(await backend.signIn(email.trim(), password));
       } else {
+        if (role === "freelancer" && (await githubUserExists(draft.github.trim().replace(/^@/, ""))) === false) {
+          setError(`We couldn’t find a GitHub account named “${draft.github.trim().replace(/^@/, "")}”. Check the spelling.`);
+          return;
+        }
         const res = await backend.signUp({ ...draftToInput(name, draft), email: email.trim(), password, role, resumeFile: draft.resumeFile, resumeText: draft.resumeText ?? "" });
         if (res.profile) onAuth(res.profile);
         else setError("Your account was created but your profile couldn’t be loaded. Make sure supabase/schema.sql has been run, then log in.");

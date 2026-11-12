@@ -42,11 +42,30 @@ export function draftFrom(p?: Profile): ProfileDraft {
 
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
-export function draftErrors(d: ProfileDraft): string | null {
+const GITHUB_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/** What is wrong with the GitHub username, or null. Freelancers must have one. */
+export function githubError(d: ProfileDraft, role: Role): string | null {
+  const gh = d.github.trim().replace(/^@/, "");
+  if (!gh) return role === "freelancer" ? "Enter your GitHub username. It's required." : null;
+  return GITHUB_NAME.test(gh) ? null : "Enter a valid GitHub username (letters, numbers and hyphens).";
+}
+
+/** What is wrong with the PayPal email, or null. Freelancers must have one so they can be paid. */
+export function paypalError(d: ProfileDraft, role: Role): string | null {
+  const pp = d.paypal.trim();
+  if (!pp) return role === "freelancer" ? "Enter your PayPal email. It's required to get paid." : null;
+  return EMAIL.test(pp) ? null : "Enter a valid PayPal email address.";
+}
+
+/** Clients must name their company or organisation. */
+export function companyError(d: ProfileDraft, role: Role): string | null {
+  return role === "client" && !d.company.trim() ? "Enter your company or organisation name. It's required." : null;
+}
+
+export function draftErrors(d: ProfileDraft, role: Role): string | null {
   if (d.portfolio.trim() && normalizeUrl(d.portfolio) === null) return "Enter a valid website address.";
-  if (d.paypal.trim() && !EMAIL.test(d.paypal.trim())) return "Enter a valid PayPal email address.";
-  if (d.github.trim() && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(d.github.trim().replace(/^@/, ""))) return "Enter a valid GitHub username.";
-  return null;
+  return companyError(d, role) ?? githubError(d, role) ?? paypalError(d, role);
 }
 
 export function draftToInput(fullName: string, d: ProfileDraft): ProfileInput {
@@ -138,20 +157,21 @@ function ResumeField({ draft, set }: { draft: ProfileDraft; set: Setter }) {
 export function ProfileFields({ role, draft, set, attempted }: { role: Role; draft: ProfileDraft; set: Setter; attempted: boolean }) {
   const upd = (p: Partial<ProfileDraft>) => set((d) => ({ ...d, ...p }));
   const badUrl = attempted && draft.portfolio.trim() !== "" && normalizeUrl(draft.portfolio) === null;
-  const badGh = attempted && draftErrors({ ...draft, portfolio: "", paypal: "" }) !== null;
-  const badPaypal = attempted && draft.paypal.trim() !== "" && !EMAIL.test(draft.paypal.trim());
+  const coErr = attempted ? companyError(draft, role) : null;
+  const ghErr = attempted ? githubError(draft, role) : null;
+  const ppErr = attempted ? paypalError(draft, role) : null;
   if (role === "client") return <>
-    <div className="field"><div className="label-row"><label>Company or organisation</label><span className="optional-tag">Optional</span></div><input value={draft.company} onChange={(e) => upd({ company: e.target.value })} placeholder="e.g. Northwind Labs" maxLength={140}/></div>
+    <div className="field"><div className="label-row"><label htmlFor="company-input">Company or organisation</label><span className="required-tag">Required</span></div><input id="company-input" value={draft.company} onChange={(e) => upd({ company: e.target.value })} placeholder="e.g. Northwind Labs" maxLength={140} className={coErr ? "invalid" : ""}/>{coErr ? <small className="error-text">{coErr}</small> : <small>Shown to freelancers on your projects. Working independently? Use your own name.</small>}</div>
     <div className="field"><div className="label-row"><label>Company website</label><span className="optional-tag">Optional</span></div><input value={draft.portfolio} onChange={(e) => upd({ portfolio: e.target.value })} placeholder="https://yourcompany.com" className={badUrl ? "invalid" : ""}/>{badUrl && <small className="error-text">Enter a valid website address.</small>}</div>
     <div className="field"><div className="label-row"><label>What do you hire for?</label><span className="optional-tag">Optional</span></div><textarea value={draft.bio} onChange={(e) => upd({ bio: e.target.value })} placeholder="A sentence about the software work you typically need." maxLength={1000} className="short"/></div>
   </>;
   return <>
     <div className="field"><label>Professional headline</label><input value={draft.headline} onChange={(e) => upd({ headline: e.target.value })} placeholder="e.g. Backend engineer · TypeScript & Postgres" maxLength={120}/></div>
     <div className="field"><label htmlFor="skills-input">Skills</label><SkillPicker id="skills-input" value={draft.skills} onChange={(skills) => upd({ skills })}/></div>
-    <div className="field"><div className="label-row"><label>GitHub username</label><span className="optional-tag">Optional</span></div><div className={`url-input ${badGh ? "invalid" : ""}`}><span className="prefix">github.com/</span><input value={draft.github} onChange={(e) => upd({ github: e.target.value })} placeholder="username"/></div>{badGh && <small className="error-text">Enter a valid GitHub username.</small>}</div>
+    <div className="field"><div className="label-row"><label htmlFor="github-input">GitHub username</label><span className="required-tag">Required</span></div><div className={`url-input ${ghErr ? "invalid" : ""}`}><span className="prefix">github.com/</span><input id="github-input" value={draft.github} onChange={(e) => upd({ github: e.target.value })} placeholder="username" autoComplete="off"/></div>{ghErr ? <small className="error-text">{ghErr}</small> : <small>Your milestone deliveries are checked on GitHub, and clients can see your profile. We check that the account exists.</small>}</div>
     <div className="field"><div className="label-row"><label>About you</label><span className="optional-tag">Optional</span></div><textarea value={draft.bio} onChange={(e) => upd({ bio: e.target.value })} placeholder="Briefly describe your experience and the work you do best." maxLength={1000} className="short"/></div>
     <div className="field"><div className="label-row"><label>Portfolio website</label><span className="optional-tag">Optional</span></div><input value={draft.portfolio} onChange={(e) => upd({ portfolio: e.target.value })} placeholder="https://yourportfolio.dev" className={badUrl ? "invalid" : ""}/>{badUrl && <small className="error-text">Enter a valid website address.</small>}</div>
-    <div className="field"><div className="label-row"><label>PayPal email for payouts</label><span className="optional-tag">Optional</span></div><input type="email" value={draft.paypal} onChange={(e) => upd({ paypal: e.target.value })} placeholder="you@example.com" className={badPaypal ? "invalid" : ""}/>{badPaypal ? <small className="error-text">Enter a valid email address.</small> : <small>Approved milestone payments are sent here. For testing, use a PayPal Sandbox <b>personal</b> account email. It isn’t shown to anyone; only the payment server uses it.</small>}</div>
+    <div className="field"><div className="label-row"><label htmlFor="paypal-input">PayPal email for payouts</label><span className="required-tag">Required</span></div><input id="paypal-input" type="email" value={draft.paypal} onChange={(e) => upd({ paypal: e.target.value })} placeholder="you@example.com" className={ppErr ? "invalid" : ""}/>{ppErr ? <small className="error-text">{ppErr}</small> : <small>Approved milestone payments are sent here. For testing, use a PayPal Sandbox <b>personal</b> account email. It isn’t shown to anyone; only the payment server uses it.</small>}</div>
     <ResumeField draft={draft} set={set}/>
   </>;
 }

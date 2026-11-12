@@ -7,7 +7,7 @@ Milestone-based payments for software projects. Clients define milestones, autho
 ## How it works
 
 1. **Client** creates a project with a brief, budget, freelancer and **late-delivery penalty** (for example 2% per day late, capped at 20%).
-2. MilestonePay suggests a 2–5 milestone plan. The client edits milestones, percentages, **due dates** and weighted acceptance criteria. Drafts stay editable until funded.
+2. **Claude** (or the built-in planner) drafts a milestone plan from the title, brief and budget, shown with a chart of budget and schedule. The client edits milestones, percentages, **due dates** and weighted acceptance criteria. Drafts stay editable until funded.
 3. **Client** authorizes the full budget with PayPal. The money is held on their PayPal account, not charged. Milestone 01 opens.
 4. **Freelancer** submits a GitHub repository. Checks run against the latest commit on the default branch:
    - `CI_PASSES`: all GitHub check runs (or the combined status) succeed
@@ -36,8 +36,16 @@ Example: a $500 milestone with 80% of criteria passed, submitted 3 days late at 
 | | Client | Freelancer |
 | --- | --- | --- |
 | Navigation | Overview, Projects, Payments, Find freelancers | Overview, My work, Earnings, My profile |
-| Profile | Company, website, what they hire for | Headline, **skills (pick from a searchable list)**, GitHub, bio, portfolio website, resume, **PayPal email for payouts** (all but the headline and skills are optional) |
+| Profile | **Company or organisation (required)**, website, what they hire for | Headline, **skills (pick from a searchable list)**, GitHub, bio, portfolio website, resume, **PayPal email for payouts** (**GitHub username and PayPal email are required**; everything else is optional) |
 | Can | Create, edit (before funding), fund and cancel projects; approve releases; request revisions; review freelancers | Submit milestones; see evidence, deadlines and revision requests; get paid out |
+
+## Sign-up rules
+
+- **GitHub username: required.** The app checks that the account exists on GitHub, so a typo can't be saved.
+- **PayPal email: required**, so every approved milestone can be paid out. For testing, use a PayPal Sandbox personal account email.
+- **Skills** use a search-as-you-type picker with about 600 well-known skills. A skill that isn't in the list can still be added: it appears as an "Add …" option, and pressing Enter adds exactly what was typed.
+- **Clients must enter a company or organisation** (their own name is fine if they work independently).
+- The database enforces these required fields too (`profiles_freelancer_required`, `profiles_client_required`). Accounts created before the rules keep working, but must fill them in before they can save any profile change.
 
 ## Finding freelancers (client search)
 
@@ -171,6 +179,40 @@ To run them on the server with **one** GitHub token (5,000 requests/hour, result
 | `GET .../contents/{path}?ref={sha}` | `FILE_EXISTS` |
 | `GET .../pulls?state=closed&base={branch}` | `PR_MERGED` |
 
+## 4. AI milestone plans (Claude)
+
+When a client creates a project, the milestone plan can be written by **Claude** from the project title, brief and budget: 2–6 milestones with titles, descriptions, budget percentages, due dates and acceptance criteria that fit that project. The client reviews and edits everything before funding. Without this set up (or if Claude can't be reached), the **built-in planner** is used instead. It recognises the type of project (online shop, mobile app, API, AI/ML, dashboard, automation, game…), sizes the plan to the budget and sets due dates, so the app always works.
+
+**What you need:** an Anthropic API key from [console.anthropic.com](https://console.anthropic.com) → **API Keys** (add credits under Billing). Keep it secret: it goes in Supabase secrets, never in `.env`.
+
+```powershell
+supabase secrets set ANTHROPIC_API_KEY=your-anthropic-key
+supabase functions deploy plan-milestones
+```
+
+Then switch it on in the SQL editor (after re-running `schema.sql`):
+
+```sql
+update public.app_settings set ai_plans_enabled = true;
+```
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| Model | `claude-opus-5-5` | Change with the secret `PLAN_MODEL`, e.g. `claude-sonnet-5-5` (cheaper) or `claude-haiku-5-5` (cheapest). |
+| Effort | `medium` | Secret `PLAN_EFFORT`: `low` is faster, `high` thinks longer. |
+| Daily limit | 20 plans per client per 24 h | Failed attempts don't count. Set in `supabase/functions/_shared/plan.ts`. |
+| Cost | roughly $0.05–0.10 per plan on Opus 5.5 | About 1.5K input and 2–4K output tokens; less on Sonnet/Haiku. |
+
+**How it works:** the `plan-milestones` Edge Function sends one request through the official Anthropic SDK with **structured outputs** (a JSON schema, so the answer is always valid JSON) and **server-side fallbacks** (if Claude declines, the API retries on a fallback model automatically). The brief is treated as data, not instructions. The answer is then cleaned up in code: percentages and criteria weights are made to add up to exactly 100, file paths must be safe relative paths, and every due date stays within 28 days (PayPal's 29-day authorization window).
+
+## Charts
+
+- **Plan at a glance** (creating or editing a project): budget per milestone and a schedule bar from start to due date, updating live as you edit.
+- **Milestones at a glance** (project page): each milestone's budget split into captured and not captured, plus its schedule with a "today" line.
+- **Captured by project** (Payments): how much of each project's budget has been paid out.
+
+All charts use one colour in two validated shades (checked for contrast in light and dark mode), write status as text rather than colour, show values on hover and keyboard focus, and have a **View as table** option.
+
 ## Secrets: where each value goes
 
 | Value | `.env` (public, bundled into the site) | Supabase secrets (server only) |
@@ -180,6 +222,7 @@ To run them on the server with **one** GitHub token (5,000 requests/hour, result
 | PayPal Client ID | ✅ `VITE_PAYPAL_CLIENT_ID` | ✅ `PAYPAL_CLIENT_ID` |
 | PayPal Secret | ❌ never | ✅ `PAYPAL_SECRET` |
 | GitHub token | ❌ never | ✅ `GITHUB_TOKEN` |
+| Anthropic API key | ❌ never | ✅ `ANTHROPIC_API_KEY` |
 
 ## What the SQL sets up
 
@@ -205,12 +248,14 @@ src/
     github.ts              re-exports the shared GitHub checks
     skills.ts              skill catalog and typeahead ranking
     resumeText.ts          reads resume text in the browser (pdf.js, OCR, mammoth)
+  charts/                  MilestoneChart (budget + schedule per milestone)
   pages/                   one file per screen
 supabase/
   schema.sql               database schema, security and functions
   functions/
     paypal/                Edge Function: orders, authorization, capture, payout, void
     github-verify/         Edge Function: server-side GitHub checks
+    plan-milestones/       Edge Function: Claude writes milestone plans
     _shared/               PayPal client, GitHub checks, action logic (shared with the browser where possible)
 ```
 
@@ -218,5 +263,5 @@ supabase/
 
 - **Email:** no email verification or password reset yet.
 - **Long projects:** PayPal authorizations expire after 29 days. Longer projects would need re-authorization or one order per milestone.
-- **Plans:** suggestions are keyword-based, not AI-generated.
+- **AI plans:** Claude writes the plan only when `ai_plans_enabled` is on and the `plan-milestones` function is deployed with an API key; otherwise the built-in planner is used.
 - **Live PayPal:** switching from sandbox to live needs live credentials and `PAYPAL_API_BASE=https://api-m.paypal.com` as a secret.

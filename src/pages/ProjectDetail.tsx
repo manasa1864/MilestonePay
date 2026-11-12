@@ -5,6 +5,7 @@ import { date, money as fmt, pad, when } from "../lib/format";
 import { criterionLabels } from "../lib/plan";
 import { criteriaOf, currentMilestone, isOverdue, latestVerification, milestoneBadge, milestonesOf, money, openRevision, personName, projectBadge, submissionOf } from "../lib/select";
 import { Button, Empty, Icon, Modal, PageHeader, StatusBadge } from "../ui";
+import { MilestoneChart, type ChartRow } from "../charts/MilestoneChart";
 
 export function ProjectDetail({ projectId }: { projectId: string }) {
   const ctx = useApp();
@@ -55,6 +56,16 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       <div><span>LATE PENALTY</span><b>{p.latePenaltyPerDay > 0 && p.latePenaltyCap > 0 ? `${p.latePenaltyPerDay}%/day, max ${p.latePenaltyCap}%` : "None"}</b><small className="muted-text mono">MP-{p.id.slice(0, 6).toUpperCase()}</small></div>
     </div>
     <section className="brief-panel"><button onClick={() => setBriefOpen(!briefOpen)}><span>PROJECT BRIEF</span><Icon name="chevron" size={15}/></button>{briefOpen ? <p>{p.brief}</p> : <p className="clamp">{p.brief}</p>}</section>
+    {ms.length > 0 && <section className="chart-card"><div className="section-heading"><div><h2>Milestones at a glance</h2><p>{fmt(totals.captured)} captured of {fmt(p.budgetCents)} · {ms.filter((m) => m.status === "approved").length} of {ms.length} milestones approved</p></div></div>
+      <MilestoneChart mode="progress" legend={["Captured", "Not captured"]} label={`Milestones for ${p.title}`} rows={(() => {
+        let prev = (p.authorizedAt ?? p.createdAt).slice(0, 10);
+        return ms.map((m): ChartRow => {
+          const start = prev;
+          if (m.dueDate) prev = m.dueDate;
+          return { key: m.id, label: `${pad(m.position)} · ${m.title}`, sub: milestoneBadge[m.status].label, amountCents: m.amountCents, capturedCents: m.capturedCents, start, due: m.dueDate, done: m.status === "approved", overdue: isOverdue(m) };
+        });
+      })()}/>
+    </section>}
     <div className="detail-layout"><main className="timeline-panel"><div className="section-heading"><div><h2>Milestone timeline</h2><p>{ms.filter((m) => m.status === "approved").length} of {ms.length} milestones approved</p></div></div>
       <div className="timeline">{ms.map((m) => {
         const b = milestoneBadge[m.status];

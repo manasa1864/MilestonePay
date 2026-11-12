@@ -6,7 +6,9 @@ import { verifyRepository, type CheckCriterion, type VerifyOutcome } from "./git
 import { PayPalClient, PayPalError, toValue } from "./paypal.ts";
 
 export type Rpc = <T = unknown>(fn: string, args: Record<string, unknown>) => Promise<T>;
-export type Deps = { rpc: Rpc; actor: string; paypal?: PayPalClient; githubToken?: string; fetchImpl?: typeof fetch };
+/** Asks the model for JSON that matches `schema`. Supplied by the plan-milestones function. */
+export type Llm = (system: string, user: string, schema: Record<string, unknown>) => Promise<unknown>;
+export type Deps = { rpc: Rpc; actor: string; paypal?: PayPalClient; githubToken?: string; fetchImpl?: typeof fetch; llm?: Llm };
 
 export class ActionError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
